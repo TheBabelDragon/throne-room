@@ -1,8 +1,8 @@
 # Throne Room
 
-**Operational live Field Observer + intelligent control for the MetaField stack.**
+**Operational live Field Observer + closed-loop spatial HUD for the MetaField stack.**
 
-Real measurements only. CSI snake → JSONL → MetaField → Aurora.
+Real measurements only. CSI snake → JSONL → MetaField → Aurora → torch HUD.
 
 ---
 
@@ -17,14 +17,11 @@ cd throne-room
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-# GUI HUD (recommended):
-pip install matplotlib numpy
 ```
 
 MetaField sibling (memory promote):
 
 ```bash
-# if not already present
 # git clone https://github.com/TheBabelDragon/metafield.git ~/projects/metafield
 export METAFIELD_ROOT=~/projects/metafield   # optional; auto-discovers ../metafield
 ```
@@ -37,8 +34,6 @@ Only **one** process may bind 4210 (the conductor’s `metafield_bridge`).
 
 ### 2. Launch the full stack (recommended)
 
-One command brings up bridge + throne view + torch HUD + Aurora action + MetaField consumer:
-
 ```bash
 cd ~/projects/throne-room
 source .venv/bin/activate
@@ -47,46 +42,76 @@ git pull
 python -m observer.startup --full
 ```
 
-`--full` is shorthand for:
-
-- `metafield_bridge` (required, UDP :4210 → JSONL)
-- `throne_view` (Rich TUI battleship sparks)
-- `torch_display` (matplotlib live HUD @ ~36 Hz)
-- `aurora_action` (cautious mode, Redis escape when available)
-- `metafield_consumer` (if MetaField root found)
-
-Equivalent explicit form:
-
-```bash
-python -m observer.startup --torch --action --action-mode cautious
-```
-
-What starts:
+`--full` starts:
 
 | Child | Role |
 |-------|------|
 | `metafield_bridge` | UDP :4210 → `/tmp/metafield/csi.jsonl` (required) |
 | `throne_view` | Rich TUI battleship sparks |
-| `torch_display` | Live 4-panel HUD: CSI · body energy map · dynamics · Aurora/host |
-| `metafield_consumer` | FO → FieldMemory JSONL if MetaField found |
-| `aurora_action` | Policy intents + Redis control plane (optional) |
+| `torch_display` | Closed-loop HUD @ ~36 Hz (CSI · body map · dynamics · Aurora) |
+| `metafield_consumer` | FO → FieldMemory if MetaField found |
+| `aurora_action` | Policy intents + Redis escape (cautious) |
 | digest loop | health · field_pressure · host_guard every 2.5 s |
 
-Digest: `/tmp/metafield/obs_digest.json`  
-Actions journal: `/tmp/metafield/aurora_actions.jsonl`  
-Escape key (Redis): `aurora:control:escape`
+Paths:
 
-### 3. Torch only / second terminal
+- Digest: `/tmp/metafield/obs_digest.json`
+- Actions: `/tmp/metafield/aurora_actions.jsonl`
+- Escape: Redis `aurora:control:escape`
+
+Equivalent explicit:
+
+```bash
+python -m observer.startup --torch --action --action-mode cautious
+```
+
+### 3. Torch only
 
 ```bash
 python -m visualization.torch_display
-# or force file / higher rate:
 python -m visualization.torch_display --file /tmp/metafield/csi.jsonl --hz 40 --size 64
+# disable head if needed:
+python -m visualization.torch_display --no-head
 ```
 
 ### 4. Stop
 
 `Ctrl+C` on the conductor — all children terminate cleanly.
+
+---
+
+## Spatial intelligence HUD
+
+Torch is the closed-loop face of the field:
+
+| Panel | Content |
+|-------|---------|
+| 1 · CSI | Subcarrier bars |
+| 2 · body energy | Multi-scale Gaussian map + action flash |
+| 3 · dynamics | mean · energy · spread · pressure · pred · residual + Aurora marks |
+| 4 · Aurora | host · children · loop chip · head state · intents |
+
+**Field head** is ON by default (`OnlineFieldHead`):
+
+- both hands equal (mean 0.40 + energy 0.40) — no mean-skew
+- no slope-to-start — first sample seeds EMA, residual quiet until real window
+- multi-head entropy modulates surprise threshold only
+- optional torch checkpoint at `/tmp/metafield/throne_head.pt` auto-upgrades
+
+---
+
+## Measurement defaults (pre-tuned — not placeholders)
+
+| Param | Value |
+|-------|-------|
+| Sample rate | 8 Hz |
+| Fine window | 90 s → **720** samples (`FINE_LEN`) |
+| Display | 150 s → **1200** samples (`DISPLAY_LEN`) |
+| Spark cells | 64 (decimated) |
+| Field heads | 8 |
+| Torch UI | ~36 Hz |
+
+Rings never use a small placeholder cap. Override: `THRONE_SAMPLE_HZ`, `THRONE_WINDOW_S`, `THRONE_TORCH=1`.
 
 ---
 
@@ -100,21 +125,6 @@ python run.py --udp
 
 ---
 
-## Measurement defaults (pre-tuned)
-
-| Param | Value |
-|-------|-------|
-| Sample rate | 8 Hz |
-| Fine window | 90 s → **720** samples |
-| Display | 150 s → **1200** samples |
-| Spark cells | 64 (decimated) |
-| Field heads | 8 |
-| Torch UI | ~36 Hz live dynamics |
-
-Override: `THRONE_SAMPLE_HZ`, `THRONE_WINDOW_S`, `THRONE_TORCH=1`, …
-
----
-
 ## Docs
 
 | Doc | Content |
@@ -123,6 +133,7 @@ Override: `THRONE_SAMPLE_HZ`, `THRONE_WINDOW_S`, `THRONE_TORCH=1`, …
 | [docs/MEASUREMENT.md](docs/MEASUREMENT.md) | Fine windows |
 | [docs/SNAKE_PATH.md](docs/SNAKE_PATH.md) | CYD → host |
 | [docs/METAFIELD_OBS_PATH.md](docs/METAFIELD_OBS_PATH.md) | CSI → memory |
-| [docs/EXTRACTION_TRIBSTRUCT.md](docs/EXTRACTION_TRIBSTRUCT.md) | Cube/ensemble patterns kept |
+| [docs/AURORA_ACTION.md](docs/AURORA_ACTION.md) | Action layer + escape |
+| [docs/EXTRACTION_TRIBSTRUCT.md](docs/EXTRACTION_TRIBSTRUCT.md) | Cube/ensemble patterns |
 
 Synthetic fixtures: `dev/` only — not operational.
