@@ -162,6 +162,7 @@ def _write_digest(
     field_snap: dict | None = None,
     host_snap: dict | None = None,
     measurement: dict | None = None,
+    head_snap: dict | None = None,
 ) -> dict[str, Any]:
     child_state = {
         c.name: {
@@ -188,7 +189,7 @@ def _write_digest(
         "type": "OBS_PATH_DIGEST",
         "timestamp": _now(),
         "source": "throne-room.control",
-        "aurora_rev": "file-digest-v2+pressure+host",
+        "aurora_rev": "file-digest-v2+pressure+host+head",
         "health": "ok" if healthy else "degraded",
         "obs_path": {
             "csi_jsonl": str(out_jsonl),
@@ -201,6 +202,7 @@ def _write_digest(
         "field": field_snap or {},
         "host": host_snap or {},
         "measurement": measurement or {},
+        "head": head_snap or {},
         "metafield_stats": {
             "health": mf_stats.get("health", "no_export"),
             "traj": mf_stats.get("traj"),
@@ -211,6 +213,27 @@ def _write_digest(
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(digest, indent=2))
     return digest
+
+
+def _read_head_snap() -> dict[str, Any]:
+    p = Path("/tmp/metafield/head_state.json")
+    if not p.exists():
+        return {}
+    try:
+        data = json.loads(p.read_text())
+        if data.get("type") != "HEAD_STATE":
+            return {}
+        return {
+            "ready": data.get("ready"),
+            "surprise": data.get("surprise"),
+            "abs_residual": data.get("abs_residual"),
+            "threshold": data.get("threshold"),
+            "window": data.get("window"),
+            "mode": data.get("mode"),
+            "n_scored": data.get("n_scored"),
+        }
+    except Exception:
+        return {}
 
 
 def main() -> None:
@@ -237,7 +260,7 @@ def main() -> None:
         help="Auto throne-up: torch display + Aurora action (cautious) + view + bridge",
     )
     parser.add_argument("--no-consumer", action="store_true")
-    parser.add_argument("--digest-interval", type=float, default=2.5)
+    parser.add_argument("--digest-interval", type=float, default=None)
     parser.add_argument("--action", action="store_true")
     parser.add_argument(
         "--action-mode", choices=("observe", "cautious", "auto"), default="cautious",
@@ -255,9 +278,16 @@ def main() -> None:
     args.digest.parent.mkdir(parents=True, exist_ok=True)
 
     try:
-        from measurement import FINE_LEN, SAMPLE_HZ, WINDOW_S, standard_banner
+        from measurement import (
+            FINE_LEN, HEAD_LEN, HEAD_WINDOW_S, SAMPLE_HZ, WINDOW_S, standard_banner,
+        )
     except ImportError:
-        from observer.measurement import FINE_LEN, SAMPLE_HZ, WINDOW_S, standard_banner  # type: ignore
+        from observer.measurement import (  # type: ignore
+            FINE_LEN, HEAD_LEN, HEAD_WINDOW_S, SAMPLE_HZ, WINDOW_S, standard_banner,
+        )
+
+    if args.digest_interval is None:
+        args.digest_interval = 1.5  # between head write rate and Aurora decide
 
     try:
         from field_cube import FieldCubeEnsemble
@@ -276,6 +306,8 @@ def main() -> None:
         "sample_hz": SAMPLE_HZ,
         "window_s": WINDOW_S,
         "fine_len": FINE_LEN,
+        "head_window_s": HEAD_WINDOW_S,
+        "head_len": HEAD_LEN,
     }
 
     env = os.environ.copy()
@@ -418,6 +450,7 @@ def main() -> None:
                     "stressed": hs.stressed,
                     "advice": hs.advice,
                 }
+                head_snap = _read_head_snap()
                 digest = _write_digest(
                     args.digest,
                     children=children,
@@ -428,6 +461,7 @@ def main() -> None:
                     field_snap=field_snap,
                     host_snap=host_snap,
                     measurement=measurement_meta,
+                    head_snap=head_snap,
                 )
                 if aurora_tick is not None and not aurora_tick_failed:
                     try:
@@ -436,13 +470,19 @@ def main() -> None:
                         print(f"[control] Aurora tick error: {e}", flush=True)
                         aurora_tick_failed = True
 
+                head_bit = ""
+                if head_snap.get("ready"):
+                    head_bit = f"  |r|={head_snap.get('abs_residual', 0)}"
+                    if head_snap.get("surprise"):
+                        head_bit += " SURPRISE"
                 print(
                     f"[control] digest health={digest['health']}  "
                     f"csi={digest['obs_path']['csi_lines']}  "
                     f"mem={digest['obs_path']['memory_lines']}  "
                     f"pressure={field_snap.get('pressure', 0):.3f}  "
                     f"host={host_snap['advice']}  "
-                    f"bodies={field_snap.get('n_bodies', 0)}",
+                    f"bodies={field_snap.get('n_bodies', 0)}"
+                    f"{head_bit}",
                     flush=True,
                 )
                 last_digest = now
