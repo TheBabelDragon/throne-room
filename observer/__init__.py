@@ -1,3 +1,3 @@
-"""Throne Room – unified live Field Observer."""
+"""Throne Room – unified live Field Observer for real measurements."""
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
