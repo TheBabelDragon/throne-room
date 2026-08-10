@@ -2,6 +2,7 @@
 Autonomous decision policies over observation digests + recent CSI.
 
 Outputs *intent* only. Dispatch is gated by RedisControl.snapshot().allowed.
+Tails a full fine-measurement window — not a placeholder line count.
 """
 
 from __future__ import annotations
@@ -11,6 +12,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from observer.measurement import POLICY_TAIL_LINES
 
 
 def _now() -> str:
@@ -49,8 +52,10 @@ def _read_json(path: Path) -> dict[str, Any] | None:
         return None
 
 
-def _tail_csi_means(jsonl: Path, max_lines: int = 40) -> dict[str, list[float]]:
-    """body_id → recent csi_mean (or observed) values."""
+def _tail_csi_means(
+    jsonl: Path, max_lines: int = POLICY_TAIL_LINES
+) -> dict[str, list[float]]:
+    """body_id → recent csi_mean values over the fine window."""
     if not jsonl.exists():
         return {}
     lines: list[str] = []
@@ -58,15 +63,19 @@ def _tail_csi_means(jsonl: Path, max_lines: int = 40) -> dict[str, list[float]]:
         with jsonl.open("rb") as f:
             f.seek(0, 2)
             size = f.tell()
-            block = 8192
+            block = 65536
             data = b""
-            while size > 0 and len(lines) < max_lines + 5:
+            # read enough raw bytes for max_lines of ~200B JSON
+            target = max_lines * 256
+            while size > 0 and len(data) < target:
                 read = min(block, size)
                 size -= read
                 f.seek(size)
                 data = f.read(read) + data
-                lines = data.splitlines()
-            text_lines = [ln.decode("utf-8", errors="replace") for ln in lines[-max_lines:]]
+            lines = data.splitlines()
+            text_lines = [
+                ln.decode("utf-8", errors="replace") for ln in lines[-max_lines:]
+            ]
     except OSError:
         return {}
 
@@ -82,7 +91,6 @@ def _tail_csi_means(jsonl: Path, max_lines: int = 40) -> dict[str, list[float]]:
         body = str(pkt.get("body_id") or "")
         if not body:
             continue
-        # MetaField canonical
         regions = pkt.get("field_regions") or []
         val = None
         for r in regions:
@@ -97,7 +105,6 @@ def _tail_csi_means(jsonl: Path, max_lines: int = 40) -> dict[str, list[float]]:
                         break
                 except (TypeError, ValueError):
                     pass
-        # flat FO fallback
         if val is None and pkt.get("region") in {"csi_mean", "csi_energy"}:
             try:
                 val = float(pkt.get("value"))
@@ -115,7 +122,6 @@ def decide(
     csi_jsonl: Path,
     mode: str,
 ) -> list[Intent]:
-    """Produce zero or more intents from current world state."""
     intents: list[Intent] = []
     digest = _read_json(digest_path) or {}
     health = str(digest.get("health") or "unknown")
@@ -123,7 +129,6 @@ def decide(
     csi_lines = int(obs.get("csi_lines") or 0)
     children = digest.get("children") or {}
 
-    # --- structural health ---
     bridge = children.get("metafield_bridge") or {}
     if not bridge.get("alive", True) and csi_lines == 0:
         intents.append(
@@ -145,29 +150,33 @@ def decide(
             )
         )
 
-    # --- CSI dynamics ---
     series = _tail_csi_means(csi_jsonl)
     for body_id, vals in series.items():
-        if len(vals) < 4:
+        if len(vals) < 8:
             continue
-        recent = vals[-8:]
+        # fine window stats — use up to last 1/4 of the ring for "recent"
+        recent_n = max(8, len(vals) // 4)
+        recent = vals[-recent_n:]
         mean = sum(recent) / len(recent)
         peak = max(recent)
         span = max(recent) - min(recent)
 
-        # quiet room → stay observe-ish
         if mean < 0.15 and span < 0.05:
             continue
 
-        # high energy / motion-ish
         if peak >= 0.75 or (mean >= 0.55 and span >= 0.2):
             intents.append(
                 Intent(
                     action="probe",
                     priority=min(1.0, 0.5 + peak * 0.4),
-                    reason=f"elevated CSI peak={peak:.2f} mean={mean:.2f}",
+                    reason=f"elevated CSI peak={peak:.2f} mean={mean:.2f} n={len(recent)}",
                     body_id=body_id,
-                    params={"focus": "csi_energy", "peak": peak, "mean": mean},
+                    params={
+                        "focus": "csi_energy",
+                        "peak": peak,
+                        "mean": mean,
+                        "samples": len(recent),
+                    },
                 )
             )
         elif span >= 0.25:
@@ -175,20 +184,21 @@ def decide(
                 Intent(
                     action="attention",
                     priority=0.45 + min(0.3, span),
-                    reason=f"CSI variance span={span:.2f}",
+                    reason=f"CSI variance span={span:.2f} n={len(recent)}",
                     body_id=body_id,
-                    params={"span": span},
+                    params={"span": span, "samples": len(recent)},
                 )
             )
 
-    # mode filters
     if mode == "observe":
         return []
     if mode == "cautious":
-        # only high-priority structural / strong peaks
-        intents = [i for i in intents if i.priority >= 0.6 or i.action in {"hold", "scale_down"}]
+        intents = [
+            i
+            for i in intents
+            if i.priority >= 0.6 or i.action in {"hold", "scale_down"}
+        ]
 
-    # de-dupe by action+body, keep highest priority
     best: dict[tuple[str, str | None], Intent] = {}
     for i in intents:
         key = (i.action, i.body_id)
