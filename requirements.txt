@@ -1,13 +1,1 @@
-# Throne Room – minimal for now
-# Will grow as the live view solidifies
-
-# core
 rich>=13.0.0
-
-# later candidates (uncomment when needed)
-# fastapi / react frontend will live in web/
-# fastapi
-# uvicorn
-# websockets
-# numpy
-# pydantic
