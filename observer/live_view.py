@@ -2,7 +2,7 @@
 """
 Throne Room – operational live Field Observer
 
-Renders a live Rich dashboard of all FieldObservation streams.
+Renders a live Rich dashboard of real FieldObservation streams.
 Supports file, stdin, and UDP (Echo Grid compatible on 4210).
 """
 
@@ -20,7 +20,6 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-# Support both `python -m observer.live_view` and direct script execution
 try:
     from .ingest import multi_source
     from .models import BodyState, Observation, RegionHistory
@@ -28,6 +27,13 @@ except ImportError:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from ingest import multi_source  # type: ignore
     from models import BodyState, Observation, RegionHistory  # type: ignore
+
+
+def _is_synthetic(obs: Observation) -> bool:
+    if not obs.meta:
+        return False
+    src = str(obs.meta.get("source", "")).lower()
+    return src in {"sim", "synthetic"} or bool(obs.meta.get("dev_only"))
 
 
 class ThroneRoom:
@@ -38,8 +44,12 @@ class ThroneRoom:
         self._last_rate_check = self.start_time
         self._packets_at_last_check = 0
         self.rate_hz = 0.0
+        self.synthetic_seen = False
 
     def ingest(self, obs: Observation) -> None:
+        if _is_synthetic(obs):
+            self.synthetic_seen = True
+
         now = time.time()
         state = self.bodies[obs.body_id]
         state.regions[obs.region] = obs
@@ -70,6 +80,8 @@ class ThroneRoom:
         active = sum(1 for b in self.bodies.values() if now - b.last_seen < 5.0)
         stalled = sum(1 for b in self.bodies.values() if now - b.last_seen >= 5.0)
 
+        warn = "  [yellow]synthetic traffic detected[/]" if self.synthetic_seen else ""
+
         header.add_row(
             Text("THRONE ROOM", style="bold magenta"),
             Text(
@@ -80,6 +92,17 @@ class ThroneRoom:
         )
 
         panels: list[Panel] = []
+
+        if self.synthetic_seen:
+            panels.append(
+                Panel(
+                    "[yellow]Synthetic / non-measured packets present. "
+                    "Operational use expects real body streams only.[/]",
+                    border_style="yellow",
+                    title="[yellow]dev warning[/]",
+                )
+            )
+
         for body_id in sorted(self.bodies.keys()):
             state = self.bodies[body_id]
             age = now - state.last_seen
@@ -127,11 +150,11 @@ class ThroneRoom:
             )
             panels.append(Panel(table, title=title, border_style=border, padding=(0, 1)))
 
-        if not panels:
+        if not self.bodies:
             panels.append(
                 Panel(
-                    "[dim]waiting for FieldObservation packets…\n"
-                    "  file / stdin / UDP :4210[/]",
+                    "[dim]waiting for real FieldObservation packets…\n"
+                    "  UDP :4210  ·  JSONL file  ·  stdin from a live body[/]",
                     border_style="dim",
                 )
             )
@@ -141,14 +164,14 @@ class ThroneRoom:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Throne Room – operational live Field Observer",
+        description="Throne Room – live observer for real FieldObservation streams",
     )
     parser.add_argument(
         "--file", "-f",
         type=Path,
         action="append",
         default=[],
-        help="JSONL file to tail (can be repeated)",
+        help="JSONL file of real observations to tail (repeatable)",
     )
     parser.add_argument(
         "--from-start",
@@ -161,7 +184,7 @@ def main() -> None:
         nargs="?",
         const=4210,
         default=None,
-        help="Also listen on UDP port (default 4210, Echo Grid compatible)",
+        help="Listen on UDP for real packets (default 4210)",
     )
     parser.add_argument(
         "--stdin",
