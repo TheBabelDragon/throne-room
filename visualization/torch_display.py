@@ -1,21 +1,17 @@
 #!/usr/bin/env python3
 """
-Throne Room — torch display (Echo-Grid-class HUD)
+Throne Room — torch display popup (Echo-class 4-panel HUD)
 
-Four-panel live surface over real FieldObservation / wifi_csi streams:
+Live surface over real FieldObservation / wifi_csi streams.
 
-  1. CSI subcarrier spectrum (latest body)
-  2. Body energy map (bodies × regions)
-  3. Time history (mean / energy / spread / pred)
-  4. Aurora + head residual strip
-
-Optional torch field head (--field-head) for learned surprise, same
-load-once-via-torch / numpy-forward pattern as Echo Grid.
+  1. CSI subcarriers
+  2. Body energy map
+  3. Time history (mean · energy · spread · pred · residual)
+  4. Aurora + field pressure + host
 
 Usage:
   python -m visualization.torch_display
   python -m visualization.torch_display --file /tmp/metafield/csi.jsonl
-  python -m visualization.torch_display --udp 4210
   python -m visualization.torch_display --field-head /tmp/metafield/throne_head.pt
 """
 
@@ -26,14 +22,22 @@ import json
 import socket
 import sys
 import time
-from collections import defaultdict, deque
+from collections import deque
 from pathlib import Path
-
-import numpy as np
 
 _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
+
+try:
+    import numpy as np
+except ImportError:
+    print(
+        "[torch-display] needs numpy + matplotlib:\n"
+        "  pip install numpy matplotlib",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 import matplotlib
 
@@ -53,6 +57,15 @@ _BACKEND = _configure_backend()
 
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
+
+try:
+    from observer.measurement import DISPLAY_LEN, standard_banner
+except ImportError:
+    DISPLAY_LEN = 1200
+
+    def standard_banner() -> str:
+        return "measurement: default"
+
 
 DEFAULT_CSI = Path("/tmp/metafield/csi.jsonl")
 DEFAULT_DIGEST = Path("/tmp/metafield/obs_digest.json")
@@ -77,7 +90,6 @@ def _tail_new_lines(path: Path, offset: int) -> tuple[list[str], int]:
 
 
 def _parse_packet(data: dict) -> dict | None:
-    """Normalize MetaField FO or flat FO or wifi_csi into a view packet."""
     if data.get("type") == "wifi_csi" or ("csi" in data and "node" in data):
         node = str(data.get("node") or "csi")
         csi = [float(x) for x in (data.get("csi") or [])[:64]]
@@ -104,7 +116,7 @@ def _parse_packet(data: dict) -> dict | None:
         }
 
     if "field_regions" in data and "body_id" in data:
-        regions = {}
+        regions: dict[str, float] = {}
         for r in data.get("field_regions") or []:
             if not isinstance(r, dict):
                 continue
@@ -119,13 +131,16 @@ def _parse_packet(data: dict) -> dict | None:
             wc = mod.get("wifi_csi") or {}
             if isinstance(wc, dict):
                 csi = [float(x) for x in (wc.get("csi") or [])[:64]]
+        confs = [
+            float(r.get("confidence", 1.0))
+            for r in (data.get("field_regions") or [])
+            if isinstance(r, dict)
+        ]
         return {
             "body_id": str(data["body_id"]),
             "csi": csi,
             "regions": regions,
-            "conf": float(
-                np.mean([float(r.get("confidence", 1.0)) for r in (data.get("field_regions") or []) if isinstance(r, dict)] or [1.0])
-            ),
+            "conf": float(np.mean(confs) if confs else 1.0),
         }
 
     if "body_id" in data and "region" in data:
@@ -166,13 +181,14 @@ class TorchDisplay:
 
         self.bodies: dict[str, dict] = {}
         self.last_csi: list[float] = []
-        self.last_body = "—"
-        self.hist_mean: deque = deque(maxlen=120)
-        self.hist_energy: deque = deque(maxlen=120)
-        self.hist_spread: deque = deque(maxlen=120)
-        self.hist_pred: deque = deque(maxlen=120)
-        self.hist_resid: deque = deque(maxlen=120)
-        self.action_marks: deque = deque(maxlen=12)
+        self.last_body = "\u2014"
+        self.hist_mean: deque = deque(maxlen=DISPLAY_LEN)
+        self.hist_energy: deque = deque(maxlen=DISPLAY_LEN)
+        self.hist_spread: deque = deque(maxlen=DISPLAY_LEN)
+        self.hist_pred: deque = deque(maxlen=DISPLAY_LEN)
+        self.hist_resid: deque = deque(maxlen=DISPLAY_LEN)
+        self.hist_pressure: deque = deque(maxlen=DISPLAY_LEN)
+        self.action_marks: deque = deque(maxlen=24)
         self.pkt_count = 0
         self._rate = 0.0
         self._rate_t = time.time()
@@ -191,11 +207,24 @@ class TorchDisplay:
         if udp_port is not None:
             self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self._sock.bind(("0.0.0.0", udp_port))
-            self._sock.settimeout(0.01)
+            try:
+                self._sock.bind(("0.0.0.0", udp_port))
+            except OSError as e:
+                print(
+                    f"[torch-display] UDP :{udp_port} bind failed ({e}) \u2014 "
+                    "use --file /tmp/metafield/csi.jsonl while bridge owns the port",
+                    flush=True,
+                )
+                self._sock.close()
+                self._sock = None
+            else:
+                self._sock.settimeout(0.01)
 
-        # --- figure ---
         self.fig = plt.figure(figsize=(13, 9.5), facecolor="#0b0d10")
+        try:
+            self.fig.canvas.manager.set_window_title("Throne Room \u00b7 torch display")
+        except Exception:
+            pass
         gs = self.fig.add_gridspec(
             2, 2, hspace=0.34, wspace=0.28, left=0.06, right=0.98, top=0.92, bottom=0.06
         )
@@ -210,74 +239,53 @@ class TorchDisplay:
             for spine in ax.spines.values():
                 spine.set_color("#333")
 
-        # 1 · subcarriers
-        self.bars = self.ax_csi.bar(
-            np.arange(32), np.zeros(32), color="#4cc9f0", width=0.85
-        )
+        self.bars = self.ax_csi.bar(np.arange(32), np.zeros(32), color="#4cc9f0", width=0.85)
         self.ax_csi.set_xlim(-0.5, 31.5)
         self.ax_csi.set_ylim(0, 1.05)
-        self.ax_csi.set_title("1 · CSI subcarriers", color="#e8eef5", fontsize=11)
+        self.ax_csi.set_title("1 \u00b7 CSI subcarriers", color="#e8eef5", fontsize=11)
         self.csi_txt = self.ax_csi.text(
-            0.02,
-            0.98,
-            "waiting…",
-            transform=self.ax_csi.transAxes,
-            ha="left",
-            va="top",
-            fontsize=8,
-            family="monospace",
-            color="#cfe8ff",
+            0.02, 0.98, "waiting\u2026", transform=self.ax_csi.transAxes,
+            ha="left", va="top", fontsize=8, family="monospace", color="#cfe8ff",
             bbox=dict(boxstyle="round,pad=0.25", facecolor="#1a2030", alpha=0.85),
         )
 
-        # 2 · body × region heat
         z = np.zeros((size, size), dtype=np.float32)
         self.im_map = self.ax_map.imshow(
             z, cmap="magma", vmin=0, vmax=1, origin="lower", extent=[0, 1, 0, 1]
         )
-        self.ax_map.set_title("2 · body energy map", color="#e8eef5", fontsize=11)
+        self.ax_map.set_title("2 \u00b7 body energy map", color="#e8eef5", fontsize=11)
         self.fig.colorbar(self.im_map, ax=self.ax_map, fraction=0.046, pad=0.04)
         self.map_txt = self.ax_map.text(
-            0.02,
-            0.98,
-            "bodies: 0",
-            transform=self.ax_map.transAxes,
-            ha="left",
-            va="top",
-            fontsize=8,
-            family="monospace",
-            color="#cfe8ff",
+            0.02, 0.98, "bodies: 0", transform=self.ax_map.transAxes,
+            ha="left", va="top", fontsize=8, family="monospace", color="#cfe8ff",
             bbox=dict(boxstyle="round,pad=0.25", facecolor="#1a2030", alpha=0.85),
         )
 
-        # 3 · history
-        self.ax_hist.set_title("3 · mean · energy · spread · pred", color="#e8eef5", fontsize=11)
-        self.ax_hist.set_xlim(0, 120)
+        self.ax_hist.set_title(
+            "3 \u00b7 mean \u00b7 energy \u00b7 spread \u00b7 pressure \u00b7 pred", color="#e8eef5", fontsize=11
+        )
+        self.ax_hist.set_xlim(0, min(300, DISPLAY_LEN))
         self.ax_hist.set_ylim(0, 1.05)
         (self.ln_mean,) = self.ax_hist.plot([], [], color="#00d4aa", lw=2.0, label="mean")
         (self.ln_energy,) = self.ax_hist.plot([], [], color="#4cc9f0", lw=1.6, label="energy")
         (self.ln_spread,) = self.ax_hist.plot([], [], color="#f4a261", lw=1.4, label="spread")
+        (self.ln_pressure,) = self.ax_hist.plot([], [], color="#c77dff", lw=1.6, label="pressure")
         (self.ln_pred,) = self.ax_hist.plot([], [], color="#ffe066", lw=1.4, alpha=0.9, label="pred")
         (self.ln_resid,) = self.ax_hist.plot([], [], color="#ff4d6d", lw=1.5, label="|resid|")
-        self.ax_hist.legend(loc="upper left", fontsize=6, framealpha=0.5, facecolor="#1a2030", labelcolor="#ccc")
+        self.ax_hist.legend(
+            loc="upper left", fontsize=6, framealpha=0.5,
+            facecolor="#1a2030", labelcolor="#ccc",
+        )
 
-        # 4 · aurora / control
-        self.ax_aurora.set_title("4 · Aurora + head", color="#e8eef5", fontsize=11)
+        self.ax_aurora.set_title("4 \u00b7 Aurora + field + host", color="#e8eef5", fontsize=11)
         self.ax_aurora.set_xlim(0, 10)
         self.ax_aurora.set_ylim(0, 6)
         self.ax_aurora.set_xticks([])
         self.ax_aurora.set_yticks([])
         self.aurora_txt = self.ax_aurora.text(
-            0.03,
-            0.97,
-            "",
-            transform=self.ax_aurora.transAxes,
-            ha="left",
-            va="top",
-            fontsize=9,
-            family="monospace",
-            color="#cfe8ff",
-            linespacing=1.45,
+            0.03, 0.97, "", transform=self.ax_aurora.transAxes,
+            ha="left", va="top", fontsize=9, family="monospace",
+            color="#cfe8ff", linespacing=1.45,
         )
         self._escape_patch = Rectangle(
             (0, 0), 1, 1, transform=self.ax_aurora.transAxes, fill=False, lw=0
@@ -287,15 +295,13 @@ class TorchDisplay:
         bits = ["csi"]
         if self.head:
             bits.append("torch-head")
-        if udp_port is not None:
+        if self._sock is not None:
             bits.append(f"udp:{udp_port}")
         if file:
             bits.append("jsonl")
         self.fig.suptitle(
-            f"THRONE ROOM  ·  {' + '.join(bits)}  ·  torch display",
-            fontsize=13,
-            color="#f0f4fa",
-            fontweight="bold",
+            f"THRONE ROOM  \u00b7  {' + '.join(bits)}  \u00b7  torch display",
+            fontsize=13, color="#f0f4fa", fontweight="bold",
         )
         self.status = self.fig.text(
             0.5, 0.01, "", ha="center", fontsize=8, family="monospace", color="#8899aa"
@@ -331,14 +337,8 @@ class TorchDisplay:
             n_bodies = float(len(self.bodies))
             mean_conf = float(np.mean([b["conf"] for b in self.bodies.values()] or [1.0]))
             feats = [
-                mean,
-                energy,
-                spread,
-                peak,
-                rssi,
-                min(1.0, n_bodies / 6.0),
-                mean_conf,
-                min(1.0, self._rate / 20.0),
+                mean, energy, spread, peak, rssi,
+                min(1.0, n_bodies / 6.0), mean_conf, min(1.0, self._rate / 20.0),
             ]
             out = self.head.update(feats)
             self.hist_pred.append(float(out["pred"]))
@@ -385,14 +385,12 @@ class TorchDisplay:
                 act = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            self.action_marks.append(
-                {
-                    "t": time.time(),
-                    "type": str(act.get("type") or act.get("action") or "?"),
-                    "priority": float(act.get("priority") or 0),
-                    "reason": str(act.get("reason") or "")[:48],
-                }
-            )
+            self.action_marks.append({
+                "t": time.time(),
+                "type": str(act.get("type") or act.get("action") or "?"),
+                "priority": float(act.get("priority") or 0),
+                "reason": str(act.get("reason") or "")[:48],
+            })
 
     def _body_grid(self) -> np.ndarray:
         grid = np.zeros((self.size, self.size), dtype=np.float32)
@@ -410,12 +408,7 @@ class TorchDisplay:
             age = now - st["last"]
             fade = 1.0 if age < 2 else (0.4 if age < 8 else 0.15)
             regs = st["regions"]
-            val = float(
-                regs.get(
-                    "csi_energy",
-                    regs.get("csi_mean", regs.get("intensity", 0.0)),
-                )
-            )
+            val = float(regs.get("csi_energy", regs.get("csi_mean", regs.get("intensity", 0.0))))
             r, c = divmod(i, cols)
             r0 = int(r * cell_h)
             r1 = int(min(self.size, (r + 1) * cell_h))
@@ -436,7 +429,6 @@ class TorchDisplay:
             self._rate_t = now
             self._rate_n = 0
 
-        # panel 1
         csi = self.last_csi[:32]
         if len(csi) < 32:
             csi = list(csi) + [0.0] * (32 - len(csi))
@@ -449,37 +441,44 @@ class TorchDisplay:
             + ("  SURPRISE" if surprise else "")
         )
 
-        # panel 2
         grid = self._body_grid()
         self.im_map.set_data(grid)
         self.im_map.set_clim(0.0, max(0.25, float(grid.max()) + 1e-9))
         active = sum(1 for b in self.bodies.values() if now - b["last"] < 5)
         self.map_txt.set_text(f"bodies {len(self.bodies)}  active {active}")
 
-        # panel 3
-        def _set(line, hist):
-            if hist:
-                ys = np.asarray(hist, dtype=float)
-                line.set_data(np.arange(len(ys)), ys)
-
-        _set(self.ln_mean, self.hist_mean)
-        _set(self.ln_energy, self.hist_energy)
-        _set(self.ln_spread, self.hist_spread)
-        _set(self.ln_pred, self.hist_pred)
-        _set(self.ln_resid, self.hist_resid)
-        self.ax_hist.set_xlim(0, max(40, len(self.hist_mean)))
-
-        # panel 4
-        digest = {}
+        digest: dict = {}
         if self.digest.exists():
             try:
                 digest = json.loads(self.digest.read_text())
             except Exception:
                 digest = {}
-        health = digest.get("health", "—")
+        pressure = float((digest.get("field") or {}).get("pressure") or 0.0)
+        self.hist_pressure.append(pressure)
+
+        def _set(line, hist):
+            if hist:
+                ys = np.asarray(hist, dtype=float)
+                n = min(300, len(ys))
+                line.set_data(np.arange(n), ys[-n:])
+
+        _set(self.ln_mean, self.hist_mean)
+        _set(self.ln_energy, self.hist_energy)
+        _set(self.ln_spread, self.hist_spread)
+        _set(self.ln_pressure, self.hist_pressure)
+        _set(self.ln_pred, self.hist_pred)
+        _set(self.ln_resid, self.hist_resid)
+        self.ax_hist.set_xlim(0, max(40, min(300, len(self.hist_mean))))
+
+        health = digest.get("health", "\u2014")
         children = digest.get("children") or {}
         alive = ", ".join(
             f"{k}:{'up' if v.get('alive') else 'down'}" for k, v in list(children.items())[:4]
+        )
+        host = digest.get("host") or {}
+        host_line = (
+            f"host cpu={host.get('cpu_pct', '\u2014')}%  mem={host.get('mem_pct', '\u2014')}%  "
+            f"{host.get('advice', '\u2014')}"
         )
         head_line = "head: off"
         if self.head:
@@ -499,7 +498,9 @@ class TorchDisplay:
 
         self.aurora_txt.set_text(
             f"digest health: {health}\n"
-            f"children: {alive or '—'}\n"
+            f"pressure: {pressure:.3f}\n"
+            f"children: {alive or '\u2014'}\n"
+            f"{host_line}\n"
             f"{head_line}\n"
             f"recent actions:\n{act_lines}"
         )
@@ -507,19 +508,30 @@ class TorchDisplay:
         self.status.set_text(
             f"frame={self._frame}  bodies={len(self.bodies)}  "
             f"rate={self._rate:.1f}Hz  pkts={self.pkt_count}  "
-            f"last={self.last_body}"
+            f"pressure={pressure:.3f}  last={self.last_body}"
         )
 
     def run(self) -> None:
         if _BACKEND == "Agg":
-            print("[torch-display] no GUI backend available")
+            print(
+                "[torch-display] no GUI backend (need Tk/Qt).\n"
+                "  On headless: SSH with X11 or run on the desktop host.",
+                flush=True,
+            )
             return
-        print(f"[torch-display] backend={_BACKEND}")
+        print(f"[torch-display] backend={_BACKEND}", flush=True)
+        print(f"[torch-display] {standard_banner()}", flush=True)
+        if self.file:
+            print(f"[torch-display] tail {self.file}", flush=True)
+        if self._sock:
+            print(f"[torch-display] UDP :{self.udp_port}", flush=True)
+
         plt.show(block=False)
         self.fig.canvas.draw()
         try:
             while self._running and plt.fignum_exists(self.fig.number):
                 self.tick()
+                self.fig.canvas.draw_idle()
                 plt.pause(0.05)
         except KeyboardInterrupt:
             pass
@@ -534,20 +546,17 @@ class TorchDisplay:
                 plt.close(self.fig)
             except Exception:
                 pass
-            print("[torch-display] closed")
+            print("[torch-display] closed", flush=True)
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="Throne Room torch display")
+    p = argparse.ArgumentParser(description="Throne Room torch display popup")
     p.add_argument("--file", "-f", type=Path, default=None)
     p.add_argument("--udp", type=int, nargs="?", const=4210, default=None)
     p.add_argument("--digest", type=Path, default=DEFAULT_DIGEST)
     p.add_argument("--actions", type=Path, default=DEFAULT_ACTIONS)
     p.add_argument(
-        "--field-head",
-        nargs="?",
-        const=str(DEFAULT_HEAD),
-        default=None,
+        "--field-head", nargs="?", const=str(DEFAULT_HEAD), default=None,
         help="Optional torch checkpoint (load once, numpy forward)",
     )
     p.add_argument("--head-threshold", type=float, default=0.30)
@@ -555,7 +564,6 @@ def main() -> None:
     a = p.parse_args()
 
     if a.file is None and a.udp is None:
-        # default: follow MetaField obs path JSONL if present, else UDP
         if DEFAULT_CSI.exists():
             a.file = DEFAULT_CSI
         else:
