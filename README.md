@@ -2,61 +2,118 @@
 
 **Operational live Field Observer + intelligent control for the MetaField stack.**
 
-Watches **real, taken measurements** from physical field bodies and can start the full observation path through MetaField digest / Aurora.
+Real measurements only. CSI snake → JSONL → MetaField → Aurora.
 
 ---
 
-## Full stack (recommended)
+## Startup walkthrough
+
+### 0. Once
+
+```bash
+mkdir -p ~/projects && cd ~/projects
+git clone https://github.com/TheBabelDragon/throne-room.git
+cd throne-room
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+# optional GUI:
+# pip install matplotlib numpy
+```
+
+MetaField sibling (memory promote):
+
+```bash
+# if not already present
+# git clone https://github.com/TheBabelDragon/metafield.git ~/projects/metafield
+export METAFIELD_ROOT=~/projects/metafield   # optional; auto-discovers ../metafield
+```
+
+### 1. Bring the snake online
+
+Power CYD CSI senders + bridge ESP32s so UDP packets reach the host on **:4210**.
+
+Only **one** process may bind 4210 (the conductor’s `metafield_bridge`).
+
+### 2. Launch the full stack
 
 ```bash
 cd ~/projects/throne-room
+source .venv/bin/activate
 git pull
-source .venv/bin/activate   # or: python -m venv .venv && pip install -r requirements.txt
 
-# conductor: CSI bridge → view → MetaField memory → Aurora digest
 python -m observer.startup
 ```
 
-Auto-discovers `../metafield` or `METAFIELD_ROOT`.  
-Bridge owns UDP **:4210**. View tails the JSONL. Digest → `/tmp/metafield/obs_digest.json`.
+What starts:
 
-See [docs/CONTROL.md](docs/CONTROL.md).
+| Child | Role |
+|-------|------|
+| `metafield_bridge` | UDP :4210 → `/tmp/metafield/csi.jsonl` (required) |
+| `throne_view` | Rich TUI battleship sparks (optional) |
+| `metafield_consumer` | FO → FieldMemory JSONL if MetaField found |
+| digest loop | health · field_pressure · host_guard every 5s |
+
+Digest file: `/tmp/metafield/obs_digest.json`
+
+### 3. Aurora action (optional)
+
+```bash
+# journal intents only (no Redis dispatch)
+python -m observer.startup --action --action-file-only
+
+# cautious + Redis when available
+python -m observer.startup --action --action-mode cautious
+```
+
+Actions journal: `/tmp/metafield/aurora_actions.jsonl`  
+Escape key (Redis): `aurora:control:escape`
+
+### 4. Torch display (optional second terminal)
+
+```bash
+python -m visualization.torch_display
+# or: python -m visualization.torch_display --file /tmp/metafield/csi.jsonl
+```
+
+### 5. Stop
+
+`Ctrl+C` on the conductor — children terminate cleanly.
 
 ---
 
-## View only
+## View-only / debug
 
 ```bash
 python run.py --file /tmp/metafield/csi.jsonl --from-start
-# or raw UDP (only if nothing else binds 4210)
+# raw UDP only if bridge is NOT running
 python run.py --udp
 ```
 
 ---
 
-## What you see
+## Measurement defaults (pre-tuned)
 
-| Element          | Meaning                                      |
-|------------------|----------------------------------------------|
-| Body panels      | One panel per real `body_id`                 |
-| ● colour         | Green = fresh, yellow = aging, red = stalled |
-| Battleship spark | Measurement intensity over time              |
-| Header rate      | Packets per second                           |
+| Param | Value |
+|-------|-------|
+| Sample rate | 8 Hz |
+| Fine window | 90 s → **720** samples |
+| Display | 150 s → **1200** samples |
+| Spark cells | 64 (decimated) |
+| Field heads | 8 |
 
-CSI nodes expand to: `rssi` · `csi_mean` · `csi_peak` · `csi_energy` · `csi_spread`.
+Override: `THRONE_SAMPLE_HZ`, `THRONE_WINDOW_S`, …
 
 ---
 
-## Paths
+## Docs
 
 | Doc | Content |
 |-----|---------|
-| [docs/CONTROL.md](docs/CONTROL.md) | Startup sequence + Aurora digest |
-| [docs/SNAKE_PATH.md](docs/SNAKE_PATH.md) | CYD → bridge → host |
-| [docs/METAFIELD_OBS_PATH.md](docs/METAFIELD_OBS_PATH.md) | CSI → FieldMemory |
+| [docs/CONTROL.md](docs/CONTROL.md) | Conductor + Aurora |
+| [docs/MEASUREMENT.md](docs/MEASUREMENT.md) | Fine windows |
+| [docs/SNAKE_PATH.md](docs/SNAKE_PATH.md) | CYD → host |
+| [docs/METAFIELD_OBS_PATH.md](docs/METAFIELD_OBS_PATH.md) | CSI → memory |
+| [docs/EXTRACTION_TRIBSTRUCT.md](docs/EXTRACTION_TRIBSTRUCT.md) | Cube/ensemble patterns kept |
 
-Synthetic generators live under `dev/` only — not operational.
-
----
-
-*The control surface for a distributed physical-field intelligence.*
+Synthetic fixtures: `dev/` only — not operational.
