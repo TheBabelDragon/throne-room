@@ -10,11 +10,16 @@ online. Torch display and Aurora treat both behind the same interface:
 
   head.update(feats) -> {pred, actual, abs_residual, surprise, ready, ...}
   head.ready, head.surprise, head.last_pred, head.last_abs_residual
+
+Spatial learning rules (hard):
+  - NO placeholder memory caps (rings are FINE_LEN / DISPLAY_LEN only)
+  - NO slope-to-start: first observation seeds state, no zero-filled warmup
+  - BOTH HANDS: mean-hand and energy-hand start equal weight (no 0.7/0.15 skew)
+  - multi-head entropy modulates threshold, not the base weight balance
 """
 
 from __future__ import annotations
 
-import math
 from collections import deque
 from pathlib import Path
 from typing import Deque, Dict, List, Sequence, Tuple
@@ -32,7 +37,6 @@ FEATURE_NAMES = [
     "packet_rate_n",
 ]
 
-# Extended multi-head features (appended when available)
 HEAD_FEATURE_NAMES = [
     "head_fused_mean",
     "head_fused_energy",
@@ -46,22 +50,14 @@ def _clip01(x: float) -> float:
     return float(np.clip(x, 0.0, 1.0))
 
 
-# ---------------------------------------------------------------------------
-# Online adaptive head (default — no torch, no checkpoint)
-# ---------------------------------------------------------------------------
-
 class OnlineFieldHead:
     """
     Multi-head aware online predictor.
 
-    Maintains a short temporal window of fused features and predicts the
-    next csi_mean (and energy) via EMA + linear trend. Residual and
-    surprise are measurement-grade, not a toy random walk.
-
-    Multi-head signal:
-      - uses head_fused_* + entropy when present in the feature vector
-      - surprise threshold softens when routing entropy is high (uncertain band)
-      - hardens when one dominant head owns the spectrum
+    Both hands (mean + energy) carry equal base weight so spatial learning
+    is not pulled toward a single channel. Cold start seeds EMA from the
+    first real observation — no zero-filled history, no residual scoring
+    until the window has real samples.
     """
 
     def __init__(
@@ -75,8 +71,8 @@ class OnlineFieldHead:
         self.threshold = float(threshold)
         self.ema_alpha = float(ema_alpha)
         self.history: Deque[List[float]] = deque(maxlen=self.window)
-        self._ema_mean = 0.0
-        self._ema_energy = 0.0
+        self._ema_mean = None  # type: float | None
+        self._ema_energy = None  # type: float | None
         self._trend = 0.0
         self.last_pred = 0.0
         self.last_actual = 0.0
@@ -87,7 +83,7 @@ class OnlineFieldHead:
         self.mode = "online"
         print(
             f"[throne-head] online multi-head  window={self.window}  "
-            f"thr={self.threshold:.2f}",
+            f"thr={self.threshold:.2f}  both-hands=equal  no-slope-start",
             flush=True,
         )
 
@@ -98,7 +94,6 @@ class OnlineFieldHead:
         base = [_clip01(float(x)) for x in list(feats)[: len(FEATURE_NAMES)]]
         while len(base) < len(FEATURE_NAMES):
             base.append(0.0)
-        # optional multi-head tail
         extra = list(feats)[len(FEATURE_NAMES) : len(FEATURE_NAMES) + len(HEAD_FEATURE_NAMES)]
         while len(extra) < len(HEAD_FEATURE_NAMES):
             extra.append(0.0)
@@ -110,28 +105,45 @@ class OnlineFieldHead:
         head_entropy = extra[3]
         head_dom = extra[4]
 
-        if not self.history:
+        # cold start: seed both hands from first real sample — no zero slope
+        if self._ema_mean is None:
             self._ema_mean = mean
             self._ema_energy = energy
+            self._trend = 0.0
+            self.history.append(base + extra)
+            self.n_scored = 1
+            self.ready = False
+            self.surprise = False
+            self.last_pred = mean
+            self.last_actual = mean
+            self.last_abs_residual = 0.0
+            return {
+                "pred": mean,
+                "actual": mean,
+                "abs_residual": 0.0,
+                "surprise": 0.0,
+                "ready": 0.0,
+                "entropy": head_entropy,
+                "dominant": head_dom,
+                "mode": 0.0,
+            }
 
-        # predictive step before observing (one-step-ahead)
+        # BOTH HANDS equal base weight (0.40 / 0.40) — not mean-heavy
         pred = _clip01(
-            self._ema_mean * 0.70
-            + self._ema_energy * 0.15
+            self._ema_mean * 0.40
+            + self._ema_energy * 0.40
             + self._trend * 0.12
-            + spread * 0.03
+            + spread * 0.08
         )
-        # multi-head bias: high entropy → trust fused less, lean on ema
+
         if head_entropy > 0.55:
-            pred = _clip01(0.65 * pred + 0.35 * self._ema_mean)
+            pred = _clip01(0.55 * pred + 0.25 * self._ema_mean + 0.20 * self._ema_energy)
         elif head_dom > 0.55:
-            # concentrated band — lean harder on recent energy
-            pred = _clip01(0.55 * pred + 0.45 * energy)
+            pred = _clip01(0.50 * pred + 0.20 * self._ema_mean + 0.30 * energy)
 
         actual = mean
         abs_r = abs(actual - pred)
 
-        # adaptive threshold: tighter when spectrum is concentrated
         thr = self.threshold
         if head_entropy < 0.25:
             thr *= 0.85
@@ -139,10 +151,10 @@ class OnlineFieldHead:
             thr *= 1.15
 
         self.history.append(base + extra)
-        # update state after score
         prev_ema = self._ema_mean
-        self._ema_mean = (1.0 - self.ema_alpha) * self._ema_mean + self.ema_alpha * mean
-        self._ema_energy = (1.0 - self.ema_alpha) * self._ema_energy + self.ema_alpha * energy
+        a = self.ema_alpha
+        self._ema_mean = (1.0 - a) * self._ema_mean + a * mean
+        self._ema_energy = (1.0 - a) * self._ema_energy + a * energy
         self._trend = 0.8 * self._trend + 0.2 * (self._ema_mean - prev_ema)
 
         self.last_pred = pred
@@ -160,13 +172,9 @@ class OnlineFieldHead:
             "ready": 1.0 if self.ready else 0.0,
             "entropy": head_entropy,
             "dominant": head_dom,
-            "mode": 0.0,  # 0 = online
+            "mode": 0.0,
         }
 
-
-# ---------------------------------------------------------------------------
-# Torch checkpoint head (optional upgrade)
-# ---------------------------------------------------------------------------
 
 class _NumpyMLP:
     def __init__(self, weights: List[Tuple[np.ndarray, np.ndarray]]):
@@ -255,8 +263,9 @@ class ThroneFieldHead:
             self.history.append(feats_l)
             self.ready = False
             self.surprise = False
+            self.n_scored += 1
             return {
-                "pred": 0.0,
+                "pred": feats_l[0],
                 "actual": feats_l[0],
                 "abs_residual": 0.0,
                 "surprise": 0.0,
@@ -269,7 +278,7 @@ class ThroneFieldHead:
             self.history.append(feats_l)
             self.ready = False
             return {
-                "pred": 0.0,
+                "pred": feats_l[0],
                 "actual": feats_l[0],
                 "abs_residual": 0.0,
                 "surprise": 0.0,
@@ -292,13 +301,9 @@ class ThroneFieldHead:
             "abs_residual": abs_r,
             "surprise": 1.0 if self.surprise else 0.0,
             "ready": 1.0,
-            "mode": 1.0,  # 1 = torch
+            "mode": 1.0,
         }
 
-
-# ---------------------------------------------------------------------------
-# Factory
-# ---------------------------------------------------------------------------
 
 def open_field_head(
     model_path: str | Path | None = None,
@@ -306,10 +311,7 @@ def open_field_head(
     threshold: float = 0.28,
     force_online: bool = False,
 ) -> OnlineFieldHead | ThroneFieldHead:
-    """
-    Prefer torch checkpoint when path exists and loads; otherwise online.
-    Always returns a usable head — head is ON by default.
-    """
+    """Prefer torch ckpt when present; otherwise online. Always returns a head."""
     if force_online:
         return OnlineFieldHead(threshold=threshold)
 
