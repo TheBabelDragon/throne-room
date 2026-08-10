@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from .measurement import FINE_LEN, SPARK_CELLS, decimate
+
 # Battleship-style intensity cells (time → right, strength → fill)
 # Absolute 0..1 scale so regions are comparable.
 _BATTLE_CELLS = "·░▒▓█"  # empty → light → mid → heavy → solid
@@ -22,29 +24,41 @@ class Observation:
 
 @dataclass
 class RegionHistory:
-    """Rolling measurement history for battleship-style time sparks."""
+    """Fine measurement ring + decimated spark for display.
+
+    Stores full-fidelity samples (FINE_LEN ≈ sample_hz × window_s).
+    Sparklines decimate to SPARK_CELLS — the ring is never the display width.
+    """
 
     values: list[float] = field(default_factory=list)
-    max_len: int = 32
+    max_len: int = FINE_LEN
 
     def push(self, value: float) -> None:
         self.values.append(max(0.0, min(1.0, float(value))))
         if len(self.values) > self.max_len:
-            self.values.pop(0)
+            # drop oldest in bulk if badly behind (file replay)
+            overflow = len(self.values) - self.max_len
+            if overflow > 1:
+                del self.values[0:overflow]
+            else:
+                self.values.pop(0)
+
+    def display_values(self) -> list[float]:
+        return decimate(self.values, SPARK_CELLS)
 
     def cells(self) -> list[tuple[str, float]]:
-        """Return (glyph, intensity) pairs for each time step."""
-        if not self.values:
+        """Spark cells from decimated fine history."""
+        series = self.display_values()
+        if not series:
             return []
         out: list[tuple[str, float]] = []
         n = len(_BATTLE_CELLS) - 1
-        for v in self.values:
+        for v in series:
             idx = int(round(v * n))
             out.append((_BATTLE_CELLS[idx], v))
         return out
 
     def sparkline(self) -> str:
-        """Plain-string fallback (no colour)."""
         return "".join(g for g, _ in self.cells())
 
 
