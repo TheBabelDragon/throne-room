@@ -1,21 +1,7 @@
 """
-Field cube ensemble — extracted from TribStruct-style state machines.
+Field cube ensemble — measurement-grade multi-body energy lattice.
 
-Kept (measurement-grade):
-  • 3×3×3 soft weight tensor per body
-  • encode(observation) → localized energy deposit
-  • slow exponential decay
-  • path propagation across an ordered ensemble (snake path)
-  • composite intensity score (inferno-equivalent, rename: field_pressure)
-  • hot-spot argmax for dominant cell
-
-Discarded:
-  • Hebrew/angelic ciphers, pantheon, personality shards
-  • crypto mining / stratum / ethash
-  • fractal string generators as "verse"
-  • self-rewriting / immortality narrative
-
-This is a temporal multi-body energy model for CSI / FO streams.
+Pure Python (no numpy) so observer.startup works with the base venv.
 """
 
 from __future__ import annotations
@@ -24,9 +10,7 @@ import hashlib
 import math
 import time
 from dataclasses import dataclass, field
-from typing import Iterable, Sequence
-
-import numpy as np
+from typing import Any
 
 try:
     from .measurement import FINE_LEN
@@ -38,53 +22,78 @@ def _clip01(x: float) -> float:
     return 0.0 if x < 0.0 else (1.0 if x > 1.0 else float(x))
 
 
+def _zeros_3() -> list[list[list[float]]]:
+    return [[[0.0 for _ in range(3)] for _ in range(3)] for _ in range(3)]
+
+
+def _max_heat_w(w: list[list[list[float]]]) -> float:
+    m = 0.0
+    for z in range(3):
+        for y in range(3):
+            for x in range(3):
+                v = w[z][y][x]
+                if v > m:
+                    m = v
+    return m
+
+
+def _argmax_w(w: list[list[list[float]]]) -> tuple[tuple[int, int, int], float]:
+    best = (0, 0, 0)
+    m = -1.0
+    for z in range(3):
+        for y in range(3):
+            for x in range(3):
+                v = w[z][y][x]
+                if v > m:
+                    m = v
+                    best = (z, y, x)
+    return best, max(0.0, m)
+
+
 @dataclass
 class FieldCube:
     """One body's soft 3×3×3 energy lattice."""
 
     body_id: str
-    weights: np.ndarray = field(default_factory=lambda: np.zeros((3, 3, 3), dtype=np.float32))
+    weights: list[list[list[float]]] = field(default_factory=_zeros_3)
     last_touch: float = 0.0
     deposits: int = 0
 
     def encode(self, text_or_key: str, strength: float = 0.13) -> None:
-        """Hash-guided deposit into a lattice cell (stable, deterministic)."""
         h = hashlib.sha256(text_or_key.encode("utf-8")).digest()
         for i in range(min(9, len(h))):
             idx = h[i] % 27
             z, y, x = idx // 9, (idx // 3) % 3, idx % 3
-            self.weights[z, y, x] = min(1.0, float(self.weights[z, y, x]) + strength)
+            self.weights[z][y][x] = min(1.0, self.weights[z][y][x] + strength)
         self.last_touch = time.time()
         self.deposits += 1
 
     def encode_regions(self, regions: dict[str, float], strength: float = 0.2) -> None:
-        """Deposit from real FO region scalars (preferred over text)."""
         if not regions:
             return
-        # map region names into cells; values scale deposit
-        names = sorted(regions.keys())
-        for i, name in enumerate(names):
+        for name in sorted(regions.keys()):
             val = _clip01(float(regions[name]))
             if val <= 0:
                 continue
             idx = (hash(name) & 0x7FFFFFFF) % 27
             z, y, x = idx // 9, (idx // 3) % 3, idx % 3
-            self.weights[z, y, x] = min(
-                1.0, float(self.weights[z, y, x]) + strength * val
+            self.weights[z][y][x] = min(
+                1.0, self.weights[z][y][x] + strength * val
             )
         self.last_touch = time.time()
         self.deposits += 1
 
     def decay(self, rate: float = 0.995) -> None:
-        self.weights *= rate
+        for z in range(3):
+            for y in range(3):
+                for x in range(3):
+                    self.weights[z][y][x] *= rate
 
     def hot(self) -> tuple[tuple[int, int, int], float]:
-        flat = int(np.argmax(self.weights))
-        z, y, x = np.unravel_index(flat, self.weights.shape)
-        return (int(z), int(y), int(x)), float(self.weights[z, y, x])
+        return _argmax_w(self.weights)
 
     def max_heat(self) -> float:
-        return float(self.weights.max()) if self.weights.size else 0.0
+        return _max_heat_w(self.weights)
 
 
 @dataclass
@@ -109,7 +118,6 @@ class FieldCubeEnsemble:
         self.path_cycle = (self.path_cycle + 1) % max(1, len(self.order))
 
     def _propagate(self, start: str, strength: float = 1.0) -> None:
-        """Transfer a fraction of heat along the ensemble order (ouroboros path)."""
         if len(self.order) < 2:
             return
         try:
@@ -117,35 +125,43 @@ class FieldCubeEnsemble:
         except ValueError:
             start_idx = 0
         n = len(self.order)
+        scale = 0.12 * strength
         for step in range(n - 1):
             a = self.cubes[self.order[(start_idx + step) % n]]
             b = self.cubes[self.order[(start_idx + step + 1) % n]]
-            transfer = a.weights * (0.12 * strength)
-            b.weights = np.clip(b.weights + transfer * 0.5, 0.0, 1.0)
-            a.weights *= 0.97
+            for z in range(3):
+                for y in range(3):
+                    for x in range(3):
+                        transfer = a.weights[z][y][x] * scale
+                        b.weights[z][y][x] = min(
+                            1.0, b.weights[z][y][x] + transfer * 0.5
+                        )
+                        a.weights[z][y][x] *= 0.97
 
     def decay_all(self, rate: float = 0.995) -> None:
         for c in self.cubes.values():
             c.decay(rate)
 
     def field_pressure(self) -> float:
-        """Composite intensity 0..1 — successor to 'inferno level' without the theatre."""
         if not self.cubes:
             return 0.0
         heats = [c.max_heat() for c in self.cubes.values()]
         total = sum(heats)
         peak = max(heats)
         active = sum(1 for h in heats if h > 0.15)
-        # blend: global mass + peak + activity count
-        score = (total / max(1, len(heats))) * 0.45 + peak * 0.40 + min(1.0, active / 4.0) * 0.15
+        score = (
+            (total / max(1, len(heats))) * 0.45
+            + peak * 0.40
+            + min(1.0, active / 4.0) * 0.15
+        )
         p = _clip01(score)
         self.pressure_hist.append(p)
         if len(self.pressure_hist) > FINE_LEN:
             self.pressure_hist = self.pressure_hist[-FINE_LEN:]
         return p
 
-    def snapshot(self) -> dict:
-        bodies = {}
+    def snapshot(self) -> dict[str, Any]:
+        bodies: dict[str, Any] = {}
         for bid, c in self.cubes.items():
             pos, heat = c.hot()
             bodies[bid] = {
@@ -163,20 +179,23 @@ class FieldCubeEnsemble:
 
 
 def density_impinge(
-    grid: np.ndarray,
+    grid: list[list[float]],
     x: float,
     y: float,
     strength: float = 1.0,
     sigma: float = 2.5,
 ) -> None:
-    """Gaussian deposit onto a 2D density grid (normalized coords 0..1)."""
-    h, w = grid.shape
-    cx = int(np.clip(x, 0.0, 1.0) * (w - 1))
-    cy = int(np.clip(y, 0.0, 1.0) * (h - 1))
+    """Gaussian deposit onto a 2D density grid (coords 0..1). Pure Python."""
+    h = len(grid)
+    w = len(grid[0]) if h else 0
+    if h == 0 or w == 0:
+        return
+    cx = int(max(0.0, min(1.0, x)) * (w - 1))
+    cy = int(max(0.0, min(1.0, y)) * (h - 1))
     rad = max(1, int(math.ceil(sigma * 3)))
     for dy in range(-rad, rad + 1):
         for dx in range(-rad, rad + 1):
             yy, xx = cy + dy, cx + dx
             if 0 <= yy < h and 0 <= xx < w:
                 g = math.exp(-(dx * dx + dy * dy) / (2 * sigma * sigma))
-                grid[yy, xx] = min(1.0, float(grid[yy, xx]) + strength * g)
+                grid[yy][xx] = min(1.0, grid[yy][xx] + strength * g)
