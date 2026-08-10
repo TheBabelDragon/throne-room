@@ -1,7 +1,7 @@
 [project]
 name = "throne-room"
-version = "0.4.0"
-description = "Unified live Field Observer for the MetaField stack"
+version = "0.5.0"
+description = "Operational live Field Observer for real MetaField body measurements"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
