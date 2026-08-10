@@ -1,0 +1,19 @@
+[project]
+name = "throne-room"
+version = "0.4.0"
+description = "Unified live Field Observer for the MetaField stack"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "rich>=13.0.0",
+]
+
+[project.scripts]
+throne = "observer.live_view:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["observer*"]
