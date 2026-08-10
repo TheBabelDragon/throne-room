@@ -55,7 +55,7 @@ def _kill(proc: subprocess.Popen | None) -> None:
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait(timeout=1.0)
-    except Exception:
+    except OSError:
         pass
 
 
@@ -125,7 +125,6 @@ def _write_digest(
     }
     healthy = all(c.alive() for c in children if c.required)
 
-    # optional MetaField stats (Aurora mod schema)
     mf_stats: dict[str, Any] = {}
     if DEFAULT_STATS.exists():
         try:
@@ -201,7 +200,6 @@ def main() -> None:
 
     children: list[Child] = []
 
-    # 1) CSI → MetaField FieldObservation JSONL (owns UDP)
     children.append(
         Child(
             name="metafield_bridge",
@@ -220,7 +218,6 @@ def main() -> None:
         )
     )
 
-    # 2) Throne view tails the same JSONL (no second UDP bind)
     if not args.no_view:
         children.append(
             Child(
@@ -238,7 +235,6 @@ def main() -> None:
             )
         )
 
-    # 3) MetaField digest consumer if repo present
     mf_root = _discover_metafield(args.metafield_root)
     if mf_root and not args.no_consumer:
         consumer = mf_root / "optical_serial_consumer.py"
@@ -285,6 +281,21 @@ def main() -> None:
     signal.signal(signal.SIGTERM, _shutdown)
 
     last_digest = 0.0
+    reported_dead: set[str] = set()
+    aurora_tick = None
+    aurora_tick_failed = False
+    if mf_root:
+        mf_path = str(mf_root)
+        if mf_path not in sys.path:
+            sys.path.insert(0, mf_path)
+        try:
+            from aurora_mods.metafield_sensing.entrypoint import (  # type: ignore
+                on_sensing_tick as aurora_tick,
+            )
+        except Exception as e:
+            print(f"[control] Aurora metafield_sensing not loaded: {e}", flush=True)
+            aurora_tick_failed = True
+
     print(
         f"[control] running  bridge=:{args.udp}  out={args.out}  digest={args.digest}",
         flush=True,
@@ -295,9 +306,10 @@ def main() -> None:
             for c in children:
                 if c.required:
                     c.restart_if_dead()
-                elif c.proc is not None and not c.alive():
-                    # optional children: report once, do not tight-loop restart
-                    pass
+                elif c.proc is not None and not c.alive() and c.name not in reported_dead:
+                    code = c.proc.returncode
+                    print(f"[control] optional {c.name} exited ({code})", flush=True)
+                    reported_dead.add(c.name)
 
             now = time.time()
             if now - last_digest >= args.digest_interval:
@@ -309,17 +321,12 @@ def main() -> None:
                     packet_lines=_count_lines(args.out),
                     memory_lines=_count_lines(args.memory),
                 )
-                # Aurora mod tick if importable
-                try:
-                    if mf_root:
-                        sys.path.insert(0, str(mf_root))
-                        from aurora_mods.metafield_sensing.entrypoint import (  # type: ignore
-                            on_sensing_tick,
-                        )
-
-                        on_sensing_tick()
-                except Exception:
-                    pass
+                if aurora_tick is not None and not aurora_tick_failed:
+                    try:
+                        aurora_tick()
+                    except Exception as e:
+                        print(f"[control] Aurora tick error: {e}", flush=True)
+                        aurora_tick_failed = True
 
                 print(
                     f"[control] digest health={digest['health']}  "
@@ -334,7 +341,6 @@ def main() -> None:
         print("[control] shutting down", flush=True)
         for c in reversed(children):
             _kill(c.proc)
-        # final digest
         _write_digest(
             args.digest,
             children=children,
