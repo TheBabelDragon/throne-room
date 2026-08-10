@@ -5,6 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+# Battleship-style intensity cells (time → right, strength → fill)
+# Absolute 0..1 scale so regions are comparable.
+_BATTLE_CELLS = "·░▒▓█"  # empty → light → mid → heavy → solid
+
 
 @dataclass
 class Observation:
@@ -18,27 +22,30 @@ class Observation:
 
 @dataclass
 class RegionHistory:
-    """Keep a short rolling history for sparklines."""
+    """Rolling measurement history for battleship-style time sparks."""
+
     values: list[float] = field(default_factory=list)
-    max_len: int = 24
+    max_len: int = 32
 
     def push(self, value: float) -> None:
-        self.values.append(value)
+        self.values.append(max(0.0, min(1.0, float(value))))
         if len(self.values) > self.max_len:
             self.values.pop(0)
 
-    def sparkline(self) -> str:
+    def cells(self) -> list[tuple[str, float]]:
+        """Return (glyph, intensity) pairs for each time step."""
         if not self.values:
-            return ""
-        blocks = " ▁▂▃▄▅▆▇█"
-        lo = min(self.values)
-        hi = max(self.values)
-        span = hi - lo if hi > lo else 1.0
-        chars = []
+            return []
+        out: list[tuple[str, float]] = []
+        n = len(_BATTLE_CELLS) - 1
         for v in self.values:
-            idx = int((v - lo) / span * (len(blocks) - 1))
-            chars.append(blocks[idx])
-        return "".join(chars)
+            idx = int(round(v * n))
+            out.append((_BATTLE_CELLS[idx], v))
+        return out
+
+    def sparkline(self) -> str:
+        """Plain-string fallback (no colour)."""
+        return "".join(g for g, _ in self.cells())
 
 
 @dataclass
