@@ -94,6 +94,7 @@ def _discover_metafield(explicit: Path | None) -> Path | None:
 
 
 def _count_lines(path: Path) -> int:
+    """Uncapped live file line count — never a placeholder ring size."""
     if not path.exists():
         return 0
     try:
@@ -151,6 +152,41 @@ def _update_cubes(ensemble: Any, packets: list[dict]) -> dict:
     return ensemble.snapshot()
 
 
+def _memory_status(children: list[Child], memory_path: Path) -> dict[str, Any]:
+    """
+    FieldMemory promotion status — kills the mem=179 illusion.
+
+    memory_lines is ONLY reported when metafield_consumer is alive and writing.
+    A leftover field_memory.jsonl from a prior run is never presented as live mem.
+    There is no 179 (or any) placeholder cap in this stack.
+    """
+    consumer = next((c for c in children if c.name == "metafield_consumer"), None)
+    if consumer is None:
+        return {
+            "active": False,
+            "status": "off",
+            "lines": None,
+            "path": str(memory_path),
+            "note": "no MetaField consumer — FO memory not promoted",
+        }
+    if not consumer.alive():
+        return {
+            "active": False,
+            "status": "down",
+            "lines": None,
+            "path": str(memory_path),
+            "note": "metafield_consumer not alive — not counting stale file",
+        }
+    lines = _count_lines(memory_path)
+    return {
+        "active": True,
+        "status": "live",
+        "lines": lines,  # uncapped live count
+        "path": str(memory_path),
+        "note": None,
+    }
+
+
 def _write_digest(
     path: Path,
     *,
@@ -158,7 +194,6 @@ def _write_digest(
     out_jsonl: Path,
     memory_jsonl: Path,
     packet_lines: int,
-    memory_lines: int,
     field_snap: dict | None = None,
     host_snap: dict | None = None,
     measurement: dict | None = None,
@@ -184,18 +219,23 @@ def _write_digest(
     if host_snap and host_snap.get("stressed"):
         healthy = False
 
+    mem = _memory_status(children, memory_jsonl)
+
     digest = {
         "schema_version": 1,
         "type": "OBS_PATH_DIGEST",
         "timestamp": _now(),
         "source": "throne-room.control",
-        "aurora_rev": "file-digest-v2+pressure+host+head",
+        "aurora_rev": "file-digest-v3+fo_mem",
         "health": "ok" if healthy else "degraded",
         "obs_path": {
             "csi_jsonl": str(out_jsonl),
-            "csi_lines": packet_lines,
+            "csi_lines": packet_lines,  # uncapped live CSI JSONL lines
             "memory_jsonl": str(memory_jsonl),
-            "memory_lines": memory_lines,
+            # Never a placeholder: None when consumer off/down
+            "memory_lines": mem["lines"],
+            "memory_active": mem["active"],
+            "memory_status": mem["status"],
             "udp_owner": "metafield_bridge",
         },
         "children": child_state,
@@ -287,7 +327,7 @@ def main() -> None:
         )
 
     if args.digest_interval is None:
-        args.digest_interval = 1.5  # between head write rate and Aurora decide
+        args.digest_interval = 1.5
 
     try:
         from field_cube import FieldCubeEnsemble
@@ -376,6 +416,10 @@ def main() -> None:
             "[control] MetaField root not found — set METAFIELD_ROOT or --metafield-root",
             flush=True,
         )
+        print(
+            "[control] fo_mem=off (FieldMemory not promoted; CSI path still live)",
+            flush=True,
+        )
 
     if args.action:
         action_cmd = [
@@ -457,7 +501,6 @@ def main() -> None:
                     out_jsonl=args.out,
                     memory_jsonl=args.memory,
                     packet_lines=_count_lines(args.out),
-                    memory_lines=_count_lines(args.memory),
                     field_snap=field_snap,
                     host_snap=host_snap,
                     measurement=measurement_meta,
@@ -475,10 +518,17 @@ def main() -> None:
                     head_bit = f"  |r|={head_snap.get('abs_residual', 0)}"
                     if head_snap.get("surprise"):
                         head_bit += " SURPRISE"
+
+                obs = digest["obs_path"]
+                if obs.get("memory_active"):
+                    fo_mem = f"fo_mem={obs['memory_lines']}"
+                else:
+                    fo_mem = f"fo_mem={obs.get('memory_status', 'off')}"
+
                 print(
                     f"[control] digest health={digest['health']}  "
-                    f"csi={digest['obs_path']['csi_lines']}  "
-                    f"mem={digest['obs_path']['memory_lines']}  "
+                    f"csi={obs['csi_lines']}  "
+                    f"{fo_mem}  "
                     f"pressure={field_snap.get('pressure', 0):.3f}  "
                     f"host={host_snap['advice']}  "
                     f"bodies={field_snap.get('n_bodies', 0)}"
@@ -498,7 +548,6 @@ def main() -> None:
             out_jsonl=args.out,
             memory_jsonl=args.memory,
             packet_lines=_count_lines(args.out),
-            memory_lines=_count_lines(args.memory),
             measurement=measurement_meta,
         )
         print("[control] stopped", flush=True)
