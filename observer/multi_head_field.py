@@ -10,11 +10,8 @@ What transfers:
   • soft routing weights across heads (load-balanced attention over bands)
   • fused scalar + head vector for Aurora / torch display
 
-What does not transfer:
-  • self-modifying source, "immortal" loops, random personality mutation
-  • training a character-level language model in pure Python
-
-This is a measurement instrument, not a chatbot.
+Feature vector order is locked to HEAD_FEATURE_NAMES in field_head:
+  head_fused_mean, head_fused_energy, head_fused_spread, head_entropy, head_dominant
 """
 
 from __future__ import annotations
@@ -65,13 +62,13 @@ class FieldPool:
     entropy: float = 0.0  # routing entropy (0 = one head owns all)
 
     def as_features(self) -> list[float]:
-        """Compact feature vector for field-head / Aurora."""
+        """Compact feature vector — order matches HEAD_FEATURE_NAMES."""
         return [
             self.fused_mean,
             self.fused_energy,
             self.fused_spread,
-            float(self.dominant_head) / max(1, len(self.heads)),
             self.entropy,
+            float(self.dominant_head) / max(1, len(self.heads)),
         ]
 
 
@@ -105,7 +102,6 @@ def pool_subcarriers(
             spread = math.sqrt(sum((v - mu) ** 2 for v in band) / len(band))
         else:
             spread = 0.0
-        # routing score: energy + mild peak bias (MoE-ish importance)
         score = energy * 0.7 + peak * 0.3
         raw_scores.append(score)
         summaries.append(
@@ -127,7 +123,6 @@ def pool_subcarriers(
     fused_energy = sum(s.energy * s.weight for s in summaries)
     fused_spread = sum(s.spread * s.weight for s in summaries)
     dominant = max(range(len(summaries)), key=lambda i: summaries[i].weight)
-    # entropy of routing distribution
     ent = -sum(w * math.log(w + 1e-12) for w in weights)
     ent_n = ent / math.log(len(weights)) if len(weights) > 1 else 0.0
 
