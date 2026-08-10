@@ -11,13 +11,15 @@ Stages:
   3. optional Throne live view (tails the same JSONL)
   4. optional MetaField consumer (FieldObservation → FieldMemoryEntry)
   5. Aurora digest loop (read-only stats + obs health; fail-closed)
+  6. optional Aurora action layer (--action)
 
 Usage:
 
   python -m observer.startup
+  python -m observer.startup --action
+  python -m observer.startup --action --action-mode cautious
   python -m observer.startup --no-view
   python -m observer.startup --metafield-root ~/projects/metafield
-  python -m observer.startup --udp 4210 --out /tmp/metafield/csi.jsonl
 """
 
 from __future__ import annotations
@@ -114,7 +116,6 @@ def _write_digest(
     packet_lines: int,
     memory_lines: int,
 ) -> dict[str, Any]:
-    """Aurora-facing observation digest (file-based, fail-closed)."""
     child_state = {
         c.name: {
             "alive": c.alive(),
@@ -137,7 +138,7 @@ def _write_digest(
         "type": "OBS_PATH_DIGEST",
         "timestamp": _now(),
         "source": "throne-room.control",
-        "aurora_rev": "file-digest-v1",
+        "aurora_rev": "file-digest-v1+action",
         "health": "ok" if healthy else "degraded",
         "obs_path": {
             "csi_jsonl": str(out_jsonl),
@@ -171,23 +172,31 @@ def _count_lines(path: Path) -> int:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Throne Room intelligent startup — obs path through MetaField digest / Aurora"
+        description="Throne Room intelligent startup — obs path / MetaField / Aurora"
     )
-    parser.add_argument("--udp", type=int, default=4210, help="CSI UDP port (bridge owns it)")
-    parser.add_argument("--out", type=Path, default=DEFAULT_OUT, help="CSI FieldObservation JSONL")
-    parser.add_argument(
-        "--memory", type=Path, default=DEFAULT_MEMORY, help="FieldMemoryEntry JSONL"
-    )
-    parser.add_argument(
-        "--digest", type=Path, default=DEFAULT_DIGEST, help="Aurora-facing digest JSON"
-    )
+    parser.add_argument("--udp", type=int, default=4210)
+    parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
+    parser.add_argument("--memory", type=Path, default=DEFAULT_MEMORY)
+    parser.add_argument("--digest", type=Path, default=DEFAULT_DIGEST)
     parser.add_argument("--metafield-root", type=Path, default=None)
-    parser.add_argument("--no-view", action="store_true", help="Skip Throne live view")
+    parser.add_argument("--no-view", action="store_true")
+    parser.add_argument("--no-consumer", action="store_true")
+    parser.add_argument("--digest-interval", type=float, default=5.0)
     parser.add_argument(
-        "--no-consumer", action="store_true", help="Skip MetaField optical_serial_consumer"
+        "--action",
+        action="store_true",
+        help="Start Aurora autonomous action layer",
     )
     parser.add_argument(
-        "--digest-interval", type=float, default=5.0, help="Seconds between Aurora digests"
+        "--action-mode",
+        choices=("observe", "cautious", "auto"),
+        default="cautious",
+        help="Aurora mode when --action is set",
+    )
+    parser.add_argument(
+        "--action-file-only",
+        action="store_true",
+        help="Aurora journals intents without Redis dispatch",
     )
     args = parser.parse_args()
 
@@ -196,7 +205,9 @@ def main() -> None:
     args.digest.parent.mkdir(parents=True, exist_ok=True)
 
     env = os.environ.copy()
-    env["PYTHONPATH"] = str(ROOT / "observer") + os.pathsep + env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = (
+        str(ROOT) + os.pathsep + str(ROOT / "observer") + os.pathsep + env.get("PYTHONPATH", "")
+    )
 
     children: list[Child] = []
 
@@ -263,6 +274,35 @@ def main() -> None:
         print(
             "[control] MetaField root not found — obs path runs without memory promote\n"
             "          set METAFIELD_ROOT or --metafield-root",
+            flush=True,
+        )
+
+    if args.action:
+        action_cmd = [
+            sys.executable,
+            "-m",
+            "aurora.action_layer",
+            "--digest",
+            str(args.digest),
+            "--csi",
+            str(args.out),
+            "--mode",
+            args.action_mode,
+        ]
+        if args.action_file_only:
+            action_cmd.append("--file-only")
+        children.append(
+            Child(
+                name="aurora_action",
+                cmd=action_cmd,
+                cwd=ROOT,
+                env=env,
+                required=False,
+            )
+        )
+        print(
+            f"[control] Aurora action  mode={args.action_mode}  "
+            f"file_only={args.action_file_only}",
             flush=True,
         )
 
