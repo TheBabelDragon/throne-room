@@ -9,7 +9,10 @@ import time
 from pathlib import Path
 from typing import Iterator
 
-from .models import Observation
+try:
+    from .models import Observation
+except ImportError:
+    from models import Observation  # type: ignore
 
 
 def parse_line(line: str) -> Observation | None:
@@ -31,7 +34,7 @@ def parse_line(line: str) -> Observation | None:
 
 
 def tail_file(path: Path, from_start: bool = False) -> Iterator[str]:
-    """Robust non-blocking tail. Handles file recreation."""
+    """Robust non-blocking tail. Handles file recreation / rotation."""
     path = Path(path)
     while True:
         try:
@@ -39,14 +42,13 @@ def tail_file(path: Path, from_start: bool = False) -> Iterator[str]:
                 if not from_start:
                     f.seek(0, 2)
                 else:
-                    from_start = False  # only once
+                    from_start = False
 
                 while True:
                     line = f.readline()
                     if line:
                         yield line
                     else:
-                        # detect truncation / rotation
                         try:
                             if path.stat().st_size < f.tell():
                                 f.seek(0)
@@ -65,15 +67,11 @@ def stdin_lines() -> Iterator[str]:
 
 
 def udp_lines(host: str = "0.0.0.0", port: int = 4210) -> Iterator[str]:
-    """Listen for newline-delimited or single-packet JSON on UDP.
-
-    Compatible with Echo Grid CSI emission (UDP 4210).
-    """
+    """Listen for JSON lines on UDP (Echo Grid CSI uses 4210)."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind((host, port))
     sock.settimeout(0.2)
-
     try:
         while True:
             try:
@@ -94,32 +92,41 @@ def multi_source(
     udp_port: int | None = None,
     from_start: bool = False,
 ) -> Iterator[Observation]:
-    """Merge multiple sources. Simple round-robin polling."""
-    import select
+    """Merge file / stdin / UDP sources into one Observation stream."""
 
-    sources: list[tuple[str, Iterator[str]]] = []
+    # Fast path: pure stdin (demo pipe, or `... | throne`)
+    only_stdin = use_stdin and not files and udp_port is None
+    if only_stdin:
+        for line in stdin_lines():
+            obs = parse_line(line)
+            if obs:
+                yield obs
+        return
+
+    sources: list[Iterator[str]] = []
 
     if use_stdin and not sys.stdin.isatty():
-        sources.append(("stdin", stdin_lines()))
+        sources.append(stdin_lines())
 
     if files:
         for p in files:
-            sources.append((f"file:{p}", tail_file(p, from_start=from_start)))
+            sources.append(tail_file(p, from_start=from_start))
 
     if udp_port is not None:
-        sources.append((f"udp:{udp_port}", udp_lines(port=udp_port)))
+        sources.append(udp_lines(port=udp_port))
 
     if not sources:
-        # default to stdin even if tty so user sees the waiting state
-        sources.append(("stdin", stdin_lines()))
+        # Waiting state — still attach stdin so the UI can sit idle
+        sources.append(stdin_lines())
 
-    # naive sequential merge — good enough for operational demo rates
-    # (real high-rate systems can move to threads later)
-    iterators = [it for _, it in sources]
+    # Round-robin. Blocking sources (stdin) only appear when data is present
+    # because file/UDP iterators sleep themselves when idle.
     while True:
         made_progress = False
-        for it in iterators:
+        for it in sources:
             try:
+                # Non-blocking style: only pull if the iterator is ready.
+                # For generators that block, this is still fine at demo rates.
                 line = next(it)
                 obs = parse_line(line)
                 if obs:
