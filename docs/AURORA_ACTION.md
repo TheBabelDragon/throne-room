@@ -13,6 +13,8 @@ CSI bodies → metafield_bridge → JSONL + obs_digest
          file journal          Redis (optional)
     aurora_actions.jsonl            │
                           ESCAPE / mode / pubsub
+                                    │
+                              torch HUD marks
 ```
 
 ## Principles
@@ -21,6 +23,7 @@ CSI bodies → metafield_bridge → JSONL + obs_digest
 2. **ESCAPE is sovereign** — `aurora:control:escape=1` freezes fire path immediately.
 3. **Observation does not require action** — Throne + bridge keep running either way.
 4. **Rate limits** — priority floor + per-action cooldown.
+5. **Multi-head aware** — policies read `head_fused_*` / `head_entropy` when present.
 
 ## Redis keys
 
@@ -36,34 +39,31 @@ CSI bodies → metafield_bridge → JSONL + obs_digest
 ## Run
 
 ```bash
+# full stack (preferred)
+python -m observer.startup --full
+
 # playground — no Redis required
 python -m aurora.action_layer --file-only --mode auto
 
-# live control plane
+# live control plane alone
 export REDIS_URL=redis://127.0.0.1:6379/0
 redis-cli set aurora:control:mode cautious
 python -m aurora.action_layer --mode cautious
 
 # ESCAPE
 redis-cli set aurora:control:escape 1
-# clear
 redis-cli del aurora:control:escape
-```
-
-With the full stack:
-
-```bash
-python -m observer.startup          # terminal A
-python -m aurora.action_layer       # terminal B
 ```
 
 ## Actions emitted
 
 | type | meaning |
 |------|---------|
-| `probe` | elevated CSI — request focus / more samples |
-| `attention` | variance spike |
-| `scale_down` | obs path degraded |
-| `hold` | bridge/path failure |
+| `probe` | elevated CSI / low-entropy focused band |
+| `attention` | variance spike / high routing entropy |
+| `scale_down` | obs path degraded or host stress |
+| `hold` | bridge/path failure or severe host stress |
+
+Torch HUD draws vertical marks on the dynamics panel and flashes targeted body rings when these journal.
 
 Bodies never receive power or motion commands from this layer without a separate actuator bridge. This is the **decision + broadcast** surface.
