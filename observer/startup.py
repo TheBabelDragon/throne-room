@@ -1,23 +1,5 @@
 #!/usr/bin/env python3
-"""
-Intelligent control / startup sequence
-
-Wires observation path → MetaField digest → Aurora-facing status
-even when no higher-level controller exists.
-
-Stages:
-  1. prepare runtime dirs + measurement banner
-  2. bind CSI uplink (metafield_bridge owns UDP :4210)
-  3. optional Throne live view (tails the same JSONL)
-  4. optional MetaField consumer (FieldObservation → FieldMemoryEntry)
-  5. digest loop (health + field_pressure + host_guard)
-  6. optional Aurora action layer (--action)
-
-Usage:
-  python -m observer.startup
-  python -m observer.startup --action --action-file-only
-  python -m observer.startup --no-view --no-consumer
-"""
+"""Intelligent control / startup sequence — multi-process conductor."""
 
 from __future__ import annotations
 
@@ -71,6 +53,7 @@ class Child:
     cwd: Path | None = None
     env: dict[str, str] = field(default_factory=dict)
     required: bool = True
+    inherit_stdio: bool = False
 
     def alive(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
@@ -80,12 +63,13 @@ class Child:
             return
         env = os.environ.copy()
         env.update(self.env)
+        std = None if self.inherit_stdio else subprocess.DEVNULL
         self.proc = subprocess.Popen(
             self.cmd,
             cwd=str(self.cwd or ROOT),
             env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=std,
+            stderr=std,
         )
         print(f"[control] start {self.name}  pid={self.proc.pid}", flush=True)
 
@@ -231,7 +215,7 @@ def _write_digest(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Throne Room intelligent startup — obs path / MetaField / Aurora"
+        description="Throne Room intelligent startup — multi-process conductor"
     )
     parser.add_argument("--udp", type=int, default=4210)
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
@@ -239,13 +223,19 @@ def main() -> None:
     parser.add_argument("--digest", type=Path, default=DEFAULT_DIGEST)
     parser.add_argument("--metafield-root", type=Path, default=None)
     parser.add_argument("--no-view", action="store_true")
+    parser.add_argument(
+        "--torch", action="store_true",
+        help="Launch torch display popup (matplotlib HUD)",
+    )
+    parser.add_argument(
+        "--no-torch", action="store_true",
+        help="Disable torch even if THRONE_TORCH=1",
+    )
     parser.add_argument("--no-consumer", action="store_true")
-    parser.add_argument("--digest-interval", type=float, default=5.0)
+    parser.add_argument("--digest-interval", type=float, default=2.5)
     parser.add_argument("--action", action="store_true")
     parser.add_argument(
-        "--action-mode",
-        choices=("observe", "cautious", "auto"),
-        default="cautious",
+        "--action-mode", choices=("observe", "cautious", "auto"), default="cautious",
     )
     parser.add_argument("--action-file-only", action="store_true")
     args = parser.parse_args()
@@ -280,11 +270,7 @@ def main() -> None:
 
     env = os.environ.copy()
     env["PYTHONPATH"] = (
-        str(ROOT)
-        + os.pathsep
-        + str(ROOT / "observer")
-        + os.pathsep
-        + env.get("PYTHONPATH", "")
+        str(ROOT) + os.pathsep + str(ROOT / "observer") + os.pathsep + env.get("PYTHONPATH", "")
     )
 
     children: list[Child] = []
@@ -293,17 +279,10 @@ def main() -> None:
         Child(
             name="metafield_bridge",
             cmd=[
-                sys.executable,
-                "-m",
-                "observer.metafield_bridge",
-                "--udp",
-                str(args.udp),
-                "--out",
-                str(args.out),
+                sys.executable, "-m", "observer.metafield_bridge",
+                "--udp", str(args.udp), "--out", str(args.out),
             ],
-            cwd=ROOT,
-            env=env,
-            required=True,
+            cwd=ROOT, env=env, required=True,
         )
     )
 
@@ -312,17 +291,26 @@ def main() -> None:
             Child(
                 name="throne_view",
                 cmd=[
-                    sys.executable,
-                    str(ROOT / "observer" / "live_view.py"),
-                    "--file",
-                    str(args.out),
-                    "--from-start",
+                    sys.executable, str(ROOT / "observer" / "live_view.py"),
+                    "--file", str(args.out), "--from-start",
                 ],
-                cwd=ROOT,
-                env=env,
-                required=False,
+                cwd=ROOT, env=env, required=False,
             )
         )
+
+    want_torch = (args.torch or os.environ.get("THRONE_TORCH") == "1") and not args.no_torch
+    if want_torch:
+        children.append(
+            Child(
+                name="torch_display",
+                cmd=[
+                    sys.executable, "-m", "visualization.torch_display",
+                    "--file", str(args.out), "--digest", str(args.digest), "--hz", "30",
+                ],
+                cwd=ROOT, env=env, required=False, inherit_stdio=True,
+            )
+        )
+        print("[control] torch display popup enabled", flush=True)
 
     mf_root = _discover_metafield(args.metafield_root)
     if mf_root and not args.no_consumer:
@@ -332,17 +320,10 @@ def main() -> None:
                 Child(
                     name="metafield_consumer",
                     cmd=[
-                        sys.executable,
-                        str(consumer),
-                        "--file",
-                        str(args.out),
-                        "--follow",
-                        "--save",
-                        str(args.memory),
+                        sys.executable, str(consumer),
+                        "--file", str(args.out), "--follow", "--save", str(args.memory),
                     ],
-                    cwd=mf_root,
-                    env=env,
-                    required=False,
+                    cwd=mf_root, env=env, required=False,
                 )
             )
             print(f"[control] MetaField root: {mf_root}", flush=True)
@@ -350,44 +331,33 @@ def main() -> None:
             print(f"[control] MetaField found but no consumer at {consumer}", flush=True)
     elif not args.no_consumer:
         print(
-            "[control] MetaField root not found — obs path runs without memory promote\n"
-            "          set METAFIELD_ROOT or --metafield-root",
+            "[control] MetaField root not found — set METAFIELD_ROOT or --metafield-root",
             flush=True,
         )
 
     if args.action:
         action_cmd = [
-            sys.executable,
-            "-m",
-            "aurora.action_layer",
-            "--digest",
-            str(args.digest),
-            "--csi",
-            str(args.out),
-            "--mode",
-            args.action_mode,
+            sys.executable, "-m", "aurora.action_layer",
+            "--digest", str(args.digest), "--csi", str(args.out),
+            "--mode", args.action_mode,
         ]
         if args.action_file_only:
             action_cmd.append("--file-only")
         children.append(
             Child(
                 name="aurora_action",
-                cmd=action_cmd,
-                cwd=ROOT,
-                env=env,
-                required=False,
+                cmd=action_cmd, cwd=ROOT, env=env, required=False,
             )
         )
         print(
-            f"[control] Aurora action  mode={args.action_mode}  "
-            f"file_only={args.action_file_only}",
+            f"[control] Aurora action  mode={args.action_mode}  file_only={args.action_file_only}",
             flush=True,
         )
 
     print("[control] startup sequence", flush=True)
     for c in children:
         c.start()
-        time.sleep(0.3)
+        time.sleep(0.25)
 
     stopping = False
 
@@ -403,9 +373,8 @@ def main() -> None:
     aurora_tick = None
     aurora_tick_failed = False
     if mf_root:
-        mf_path = str(mf_root)
-        if mf_path not in sys.path:
-            sys.path.insert(0, mf_path)
+        if str(mf_root) not in sys.path:
+            sys.path.insert(0, str(mf_root))
         try:
             from aurora_mods.metafield_sensing.entrypoint import (  # type: ignore
                 on_sensing_tick as aurora_tick,
@@ -425,8 +394,7 @@ def main() -> None:
                 if c.required:
                     c.restart_if_dead()
                 elif c.proc is not None and not c.alive() and c.name not in reported_dead:
-                    code = c.proc.returncode
-                    print(f"[control] optional {c.name} exited ({code})", flush=True)
+                    print(f"[control] optional {c.name} exited ({c.proc.returncode})", flush=True)
                     reported_dead.add(c.name)
 
             now = time.time()
@@ -469,7 +437,7 @@ def main() -> None:
                 )
                 last_digest = now
 
-            time.sleep(0.5)
+            time.sleep(0.4)
     finally:
         print("[control] shutting down", flush=True)
         for c in reversed(children):
