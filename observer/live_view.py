@@ -1,22 +1,17 @@
 #!/usr/bin/env python3
 """
-Throne Room – first live view
+Throne Room – operational live Field Observer
 
-Tails a FieldObservation JSONL stream (file or stdin) and renders a live
-Rich dashboard grouped by body → region.
+Renders a live Rich dashboard of all FieldObservation streams.
+Supports file, stdin, and UDP (Echo Grid compatible on 4210).
 """
 
 from __future__ import annotations
 
 import argparse
-import json
-import sys
 import time
 from collections import defaultdict
-from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
-from typing import Any
 
 from rich.console import Console, Group
 from rich.live import Live
@@ -24,21 +19,8 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-
-@dataclass
-class Observation:
-    timestamp: str
-    body_id: str
-    region: str
-    value: float
-    confidence: float = 1.0
-    meta: dict[str, Any] | None = None
-
-
-@dataclass
-class BodyState:
-    last_seen: float = 0.0
-    regions: dict[str, Observation] = field(default_factory=dict)
+from .ingest import multi_source
+from .models import BodyState, Observation, RegionHistory
 
 
 class ThroneRoom:
@@ -46,12 +28,28 @@ class ThroneRoom:
         self.bodies: dict[str, BodyState] = defaultdict(BodyState)
         self.total_packets = 0
         self.start_time = time.time()
+        self._last_rate_check = self.start_time
+        self._packets_at_last_check = 0
+        self.rate_hz = 0.0
 
     def ingest(self, obs: Observation) -> None:
+        now = time.time()
         state = self.bodies[obs.body_id]
         state.regions[obs.region] = obs
-        state.last_seen = time.time()
+        state.last_seen = now
+        state.packet_count += 1
+
+        if obs.region not in state.history:
+            state.history[obs.region] = RegionHistory()
+        state.history[obs.region].push(obs.value)
+
         self.total_packets += 1
+
+        if now - self._last_rate_check >= 1.0:
+            dt = now - self._last_rate_check
+            self.rate_hz = (self.total_packets - self._packets_at_last_check) / dt
+            self._last_rate_check = now
+            self._packets_at_last_check = self.total_packets
 
     def render(self) -> Group:
         now = time.time()
@@ -59,107 +57,127 @@ class ThroneRoom:
 
         header = Table.grid(expand=True)
         header.add_column(justify="left")
+        header.add_column(justify="center")
         header.add_column(justify="right")
+
+        active = sum(1 for b in self.bodies.values() if now - b.last_seen < 5.0)
+        stalled = sum(1 for b in self.bodies.values() if now - b.last_seen >= 5.0)
+
         header.add_row(
             Text("THRONE ROOM", style="bold magenta"),
-            Text(f"packets: {self.total_packets}   uptime: {uptime:.0f}s", style="dim"),
+            Text(f"{active} active  ·  {stalled} stalled  ·  {self.rate_hz:.1f} Hz", style="cyan"),
+            Text(f"pkts {self.total_packets}   up {uptime:.0f}s", style="dim"),
         )
 
-        panels = []
+        panels: list[Panel] = []
         for body_id in sorted(self.bodies.keys()):
             state = self.bodies[body_id]
             age = now - state.last_seen
-            age_style = "green" if age < 2.0 else "yellow" if age < 8.0 else "red"
 
-            table = Table(show_header=True, header_style="bold cyan", box=None, pad_edge=False)
-            table.add_column("region", style="white", min_width=12)
-            table.add_column("value", justify="right", min_width=8)
-            table.add_column("conf", justify="right", min_width=6)
-            table.add_column("age", justify="right", min_width=6)
+            if age < 2.0:
+                age_style = "green"
+                border = "green"
+            elif age < 8.0:
+                age_style = "yellow"
+                border = "yellow"
+            else:
+                age_style = "red"
+                border = "red"
+
+            table = Table(
+                show_header=True,
+                header_style="bold cyan",
+                box=None,
+                pad_edge=False,
+                expand=True,
+            )
+            table.add_column("region", style="white", min_width=10)
+            table.add_column("value", justify="right", min_width=7)
+            table.add_column("spark", min_width=14)
+            table.add_column("conf", justify="right", min_width=5)
 
             for region, obs in sorted(state.regions.items()):
-                val_style = "bold green" if obs.value > 0.7 else "yellow" if obs.value > 0.35 else "dim"
+                hist = state.history.get(region)
+                spark = hist.sparkline() if hist else ""
+
+                if obs.value > 0.7:
+                    val_style = "bold green"
+                elif obs.value > 0.35:
+                    val_style = "yellow"
+                else:
+                    val_style = "dim"
+
                 table.add_row(
                     region,
                     Text(f"{obs.value:.3f}", style=val_style),
+                    Text(spark, style="bright_black"),
                     f"{obs.confidence:.2f}",
-                    Text(f"{age:.1f}s", style=age_style),
                 )
 
-            title = f"[bold]{body_id}[/]  [{age_style}]●[/]"
-            panels.append(Panel(table, title=title, border_style="blue", padding=(0, 1)))
+            title = f"[bold]{body_id}[/]  [{age_style}]●[/]  [dim]{state.packet_count} pkts[/]"
+            panels.append(Panel(table, title=title, border_style=border, padding=(0, 1)))
 
         if not panels:
-            panels.append(Panel("[dim]waiting for FieldObservation packets…[/]", border_style="dim"))
+            panels.append(
+                Panel(
+                    "[dim]waiting for FieldObservation packets…\n"
+                    "  file / stdin / UDP :4210[/]",
+                    border_style="dim",
+                )
+            )
 
-        return Group(header, *panels)
-
-
-def parse_line(line: str) -> Observation | None:
-    line = line.strip()
-    if not line:
-        return None
-    try:
-        data = json.loads(line)
-        return Observation(
-            timestamp=data.get("timestamp", ""),
-            body_id=str(data.get("body_id", "unknown")),
-            region=str(data.get("region", "unknown")),
-            value=float(data.get("value", 0.0)),
-            confidence=float(data.get("confidence", 1.0)),
-            meta=data.get("meta"),
-        )
-    except (json.JSONDecodeError, TypeError, ValueError):
-        return None
-
-
-def tail_file(path: Path):
-    """Simple non-blocking tail."""
-    with path.open("r") as f:
-        f.seek(0, 2)  # go to end
-        while True:
-            line = f.readline()
-            if line:
-                yield line
-            else:
-                time.sleep(0.05)
+        return Group(header, Text(""), *panels)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Throne Room – live Field Observer")
+    parser = argparse.ArgumentParser(
+        description="Throne Room – operational live Field Observer",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument(
         "--file", "-f",
         type=Path,
-        help="JSONL file to tail (default: stdin)",
+        action="append",
+        default=[],
+        help="JSONL file to tail (can be repeated)",
     )
     parser.add_argument(
         "--from-start",
         action="store_true",
-        help="Read existing content first, then tail",
+        help="Read existing file content first, then tail",
+    )
+    parser.add_argument(
+        "--udp",
+        type=int,
+        nargs="?",
+        const=4210,
+        default=None,
+        help="Also listen on UDP port (default 4210, Echo Grid compatible)",
+    )
+    parser.add_argument(
+        "--stdin",
+        action="store_true",
+        help="Force reading from stdin",
     )
     args = parser.parse_args()
 
     console = Console()
     throne = ThroneRoom()
 
-    def source():
-        if args.file:
-            if args.from_start and args.file.exists():
-                with args.file.open() as f:
-                    for line in f:
-                        yield line
-            yield from tail_file(args.file)
-        else:
-            for line in sys.stdin:
-                yield line
+    use_stdin = args.stdin or (not args.file and args.udp is None)
 
-    with Live(throne.render(), console=console, refresh_per_second=8) as live:
+    source = multi_source(
+        files=args.file or None,
+        use_stdin=use_stdin,
+        udp_port=args.udp,
+        from_start=args.from_start,
+    )
+
+    with Live(throne.render(), console=console, refresh_per_second=10, screen=False) as live:
         try:
-            for line in source():
-                obs = parse_line(line)
-                if obs:
-                    throne.ingest(obs)
-                    live.update(throne.render())
+            for obs in source:
+                throne.ingest(obs)
+                live.update(throne.render())
         except KeyboardInterrupt:
             console.print("\n[dim]Throne Room closed.[/]")
 
