@@ -1,72 +1,91 @@
 # Throne Room
 
-**Unified live Field Observer for the MetaField stack.**
+**Operational live Field Observer for the MetaField stack.**
 
-The single place to *watch* the whole organism.  
-(It does **not** replace MetaField, Echo, or the physical nodes — it is the control surface that looks at all of them.)
+One place to watch every body and stream:
+
+- Optical, ultrasonic/Echo, CSI, Hall, ZVS…
+- Live values + sparklines
+- Packet rate, active / stalled status
+- File, stdin, and UDP (Echo Grid compatible on port 4210)
 
 ---
 
-## Launch from here
+## Quick start
 
 ```bash
+git clone https://github.com/TheBabelDragon/throne-room.git
 cd throne-room
-pip install -r requirements.txt
+python -m venv .venv
+source .venv/bin/activate
+pip install -e .
 
-# One-command demo (simulator + live view)
+# easiest — full demo
 python run.py --demo
 ```
 
-That’s the easiest way to see everything working.
-
-### Other useful launches
+### Operational modes
 
 ```bash
-# Watch an existing JSONL stream (e.g. from MetaField / Echo / real nodes)
+# watch a JSONL stream (MetaField / Echo / real nodes)
 python run.py --file /tmp/throne.jsonl --from-start
 
-# Or the classic two-terminal way
-python simulator/field_observation_sim.py --file /tmp/throne.jsonl
-python run.py --file /tmp/throne.jsonl --from-start
+# listen for Echo Grid / CSI on UDP 4210
+python run.py --udp
+
+# both at once
+python run.py --file /tmp/throne.jsonl --udp
+
+# after pip install -e .
+throne --udp
+throne --file /tmp/throne.jsonl --from-start
 ```
 
-### What still launches from their own repos
+---
 
-| Component              | Launch from                          |
-|------------------------|--------------------------------------|
-| MetaField lattice      | `metafield/`                         |
-| Echo Grid / ultrasonic | `echo-grid-ultrasonic-os/`           |
-| Optical / Hall / ZVS   | their respective `*-s3` or node repos |
-| field-bus firmware     | `field-bus/` + each node project     |
-| **This view**          | **`throne-room/`** ← you are here    |
+## What you see
 
-Throne Room is the conglomerated *observer*, not the conglomerated *runtime*.
+| Element              | Meaning                                      |
+|----------------------|----------------------------------------------|
+| Body panels          | One panel per `body_id`                      |
+| ● colour             | Green = fresh, yellow = aging, red = stalled |
+| Sparkline            | Recent value history                         |
+| Header rate          | Packets per second                           |
+| Active / stalled     | Bodies seen in last 5 s vs older             |
+
+---
+
+## Architecture note
+
+Throne Room is the **observer**, not the runtime.
+
+| Component                | Launch from                     |
+|--------------------------|---------------------------------|
+| This live view           | `throne-room/`                  |
+| MetaField lattice        | `metafield/`                    |
+| Echo Grid / ultrasonic   | `echo-grid-ultrasonic-os/`      |
+| Optical / Hall / ZVS     | their respective node repos     |
+| field-bus                | `field-bus/` + node firmwares   |
+
+Bodies emit `FieldObservation` packets.  
+Throne Room makes them visible as one organism.
 
 ---
 
 ## Status
 
-**v0.3** — simulator + live Rich TUI + single-entry `run.py`
+**v0.4 — operational**
 
-### What you see
+- Multi-source ingest (file · stdin · UDP)
+- Sparklines + rate + health colouring
+- Installable package (`throne` command)
+- Robust file tail (handles rotation)
 
-- Bodies grouped as panels
-- Live region values + confidence
-- Packet age colouring (green / yellow / red)
-- Running packet count + uptime
+### Next
 
-## Next
-
-- UDP / serial ingest
 - MetaField latent + attractor surface
-- Active probe decisions visible in the same view
-
-## Quick Links
-
-- [MetaField](https://github.com/TheBabelDragon/metafield)
-- [Echo Grid Ultrasonic OS](https://github.com/TheBabelDragon/echo-grid-ultrasonic-os)
-- [field-bus](https://github.com/TheBabelDragon/field-bus)
-- [optical-body-s3](https://github.com/TheBabelDragon/optical-body-s3)
+- Active-probe decisions in the same view
+- Optional web surface
 
 ---
 
