@@ -67,6 +67,45 @@ def flat_obs_to_metafield_packet(rows: list) -> dict | None:
     }
 
 
+def _enrich_with_heads(packet: dict, data: dict) -> dict:
+    """Attach multi-head CSI band features when subcarriers are present."""
+    try:
+        from multi_head_field import pool_subcarriers  # type: ignore
+    except ImportError:
+        try:
+            from .multi_head_field import pool_subcarriers
+        except ImportError:
+            return packet
+    csi = data.get("csi") or []
+    if not csi and isinstance(packet.get("modality"), dict):
+        wc = (packet["modality"] or {}).get("wifi_csi") or {}
+        csi = wc.get("csi") or []
+    if not csi:
+        return packet
+    pool = pool_subcarriers(csi)
+    regions = list(packet.get("field_regions") or [])
+    extra = [
+        ("head_fused_mean", pool.fused_mean),
+        ("head_fused_energy", pool.fused_energy),
+        ("head_fused_spread", pool.fused_spread),
+        ("head_entropy", pool.entropy),
+        ("head_dominant", float(pool.dominant_head) / max(1, len(pool.heads))),
+    ]
+    existing = {r.get("region") for r in regions if isinstance(r, dict)}
+    for name, val in extra:
+        if name in existing:
+            continue
+        regions.append({
+            "region": name,
+            "observed": float(val),
+            "expected": None,
+            "confidence": 0.9,
+            "anomaly": 0.0,
+        })
+    packet["field_regions"] = regions
+    return packet
+
+
 def wifi_csi_dict_to_metafield(data: dict) -> dict:
     """Direct wifi_csi JSON → canonical MetaField FieldObservation."""
     rows = _from_wifi_csi(data)
@@ -83,7 +122,6 @@ def wifi_csi_dict_to_metafield(data: dict) -> dict:
             "modality": {"wifi_csi": {"error": "empty_expand"}},
             "health": "error",
         }
-    # keep raw subcarriers in modality for later geometry / replay
     csi = data.get("csi") or []
     packet["modality"] = {
         "wifi_csi": {
@@ -155,7 +193,7 @@ def main() -> None:
                 continue
 
             if data.get("type") == "wifi_csi" or ("csi" in data and "node" in data):
-                packet = wifi_csi_dict_to_metafield(data)
+                packet = _enrich_with_heads(wifi_csi_dict_to_metafield(data), data)
             elif "field_regions" in data and "body_id" in data:
                 packet = data
             else:
