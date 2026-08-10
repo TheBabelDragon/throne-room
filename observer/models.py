@@ -5,11 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from .measurement import FINE_LEN, SPARK_CELLS, decimate
+try:
+    from .measurement import FINE_LEN, SPARK_CELLS, decimate
+except ImportError:
+    from measurement import FINE_LEN, SPARK_CELLS, decimate  # type: ignore
 
 # Battleship-style intensity cells (time → right, strength → fill)
 # Absolute 0..1 scale so regions are comparable.
-_BATTLE_CELLS = "·░▒▓█"  # empty → light → mid → heavy → solid
+_BATTLE_CELLS = "·░▒▓█"
 
 
 @dataclass
@@ -36,7 +39,6 @@ class RegionHistory:
     def push(self, value: float) -> None:
         self.values.append(max(0.0, min(1.0, float(value))))
         if len(self.values) > self.max_len:
-            # drop oldest in bulk if badly behind (file replay)
             overflow = len(self.values) - self.max_len
             if overflow > 1:
                 del self.values[0:overflow]
@@ -47,7 +49,6 @@ class RegionHistory:
         return decimate(self.values, SPARK_CELLS)
 
     def cells(self) -> list[tuple[str, float]]:
-        """Spark cells from decimated fine history."""
         series = self.display_values()
         if not series:
             return []
