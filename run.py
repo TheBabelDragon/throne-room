@@ -32,7 +32,7 @@ def _kill(proc: subprocess.Popen) -> None:
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait(timeout=1.0)
-    except Exception:
+    except OSError:
         pass
 
 
