@@ -1,16 +1,38 @@
 #!/usr/bin/env python3
 """
 Throne Room launcher — single entry point for operational use.
+Works without `pip install -e .` (uses local paths).
 """
 
 from __future__ import annotations
 
 import argparse
+import os
+import signal
 import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
+
+
+def _live_cmd() -> list[str]:
+    """Prefer module form; fall back to script path."""
+    return [sys.executable, str(ROOT / "observer" / "live_view.py")]
+
+
+def _kill(proc: subprocess.Popen) -> None:
+    if proc.poll() is not None:
+        return
+    try:
+        proc.terminate()
+        try:
+            proc.wait(timeout=1.5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=1.0)
+    except Exception:
+        pass
 
 
 def main() -> None:
@@ -44,23 +66,42 @@ Examples:
     )
     args = parser.parse_args()
 
-    live_view = [sys.executable, "-m", "observer.live_view"]
+    env = os.environ.copy()
+    # ensure observer/ is importable when live_view is run as a script
+    env["PYTHONPATH"] = str(ROOT / "observer") + os.pathsep + env.get("PYTHONPATH", "")
+
     simulator = ROOT / "simulator" / "field_observation_sim.py"
 
     if args.demo:
         sim = subprocess.Popen(
             [sys.executable, str(simulator)],
             stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
             cwd=ROOT,
+            env=env,
         )
+        view = None
         try:
-            subprocess.run(live_view, stdin=sim.stdout, cwd=ROOT)
+            view = subprocess.Popen(
+                _live_cmd(),
+                stdin=sim.stdout,
+                cwd=ROOT,
+                env=env,
+            )
+            # close our copy of the pipe so view sees EOF when sim dies
+            if sim.stdout:
+                sim.stdout.close()
+            view.wait()
+        except KeyboardInterrupt:
+            pass
         finally:
-            sim.terminate()
-            sim.wait()
-        return
+            if view is not None:
+                _kill(view)
+            _kill(sim)
+        # quiet exit — no traceback
+        sys.exit(0)
 
-    cmd = live_view[:]
+    cmd = _live_cmd()
     for f in args.file:
         cmd += ["--file", str(f)]
     if args.from_start:
@@ -68,9 +109,19 @@ Examples:
     if args.udp is not None:
         cmd += ["--udp", str(args.udp)]
 
-    # if nothing specified, default to stdin behaviour inside live_view
-    subprocess.run(cmd, cwd=ROOT)
+    try:
+        proc = subprocess.Popen(cmd, cwd=ROOT, env=env)
+        proc.wait()
+        sys.exit(proc.returncode or 0)
+    except KeyboardInterrupt:
+        _kill(proc)
+        sys.exit(0)
 
 
 if __name__ == "__main__":
+    # ignore SIGPIPE so broken pipes during shutdown stay quiet
+    try:
+        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+    except (AttributeError, ValueError):
+        pass
     main()
