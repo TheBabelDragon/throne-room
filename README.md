@@ -14,17 +14,34 @@ One coherent view instead of a pile of separate terminals.
 
 ## Status
 
-**v0.1** — skeleton + working FieldObservation simulator.
+**v0.2** — simulator + live Rich TUI observer.
+
+### Quick start
 
 ```bash
-# fire synthetic bodies
-python simulator/field_observation_sim.py
+pip install -r requirements.txt
 
-# or write to a JSONL file MetaField can already consume
+# Terminal 1 – synthetic bodies
 python simulator/field_observation_sim.py --file /tmp/throne.jsonl
+
+# Terminal 2 – watch them live
+python observer/live_view.py --file /tmp/throne.jsonl --from-start
 ```
 
-Next up: live ingest + first visual surface.
+Or pipe directly:
+
+```bash
+python simulator/field_observation_sim.py | python observer/live_view.py
+```
+
+### What you see
+
+- Bodies grouped as panels
+- Live region values + confidence
+- Packet age colouring (green / yellow / red)
+- Running packet count + uptime
+
+---
 
 ## Design Intent
 
@@ -32,6 +49,12 @@ Next up: live ingest + first visual surface.
 - Same `FieldObservation` schema already used by `optical-body-s3`, Echo Grid, etc.
 - Fast enough to feel real-time
 - Clear visual hierarchy: bodies → field state → MetaField mind
+
+## Next
+
+- UDP / serial ingest
+- MetaField latent + attractor surface
+- Active probe decisions visible in the same view
 
 ## Quick Links
 
