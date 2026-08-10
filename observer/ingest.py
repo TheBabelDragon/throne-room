@@ -1,11 +1,18 @@
-"""Ingest backends for Throne Room (file, stdin, UDP)."""
+"""Ingest backends for Throne Room (file, stdin, UDP).
+
+Understands both:
+  - FieldObservation  {body_id, region, value, ...}
+  - wifi_csi          {node, rssi, csi[32], type: "wifi_csi"}  (ESP32 / CYD / gateway)
+"""
 
 from __future__ import annotations
 
 import json
+import math
 import socket
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
@@ -15,26 +22,91 @@ except ImportError:
     from models import Observation  # type: ignore
 
 
-def parse_line(line: str) -> Observation | None:
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _rssi_norm(rssi: float) -> float:
+    """Map typical WiFi RSSI (-90..-30) into 0..1."""
+    return max(0.0, min(1.0, (float(rssi) + 90.0) / 60.0))
+
+
+def _from_wifi_csi(data: dict) -> list[Observation]:
+    """Expand a wifi_csi packet into FieldObservation rows."""
+    node = str(data.get("node") or data.get("body_id") or "csi-unknown")
+    ts = data.get("timestamp")
+    if isinstance(ts, (int, float)):
+        # millis uptime on device — stamp with host time for the view
+        timestamp = _now_iso()
+    else:
+        timestamp = str(ts) if ts else _now_iso()
+
+    rssi = float(data.get("rssi", -80))
+    csi = data.get("csi") or []
+    try:
+        csi_vals = [float(x) for x in csi]
+    except (TypeError, ValueError):
+        csi_vals = []
+
+    mean = sum(csi_vals) / len(csi_vals) if csi_vals else 0.0
+    peak = max(csi_vals) if csi_vals else 0.0
+    # simple energy + variance as motion-ish features
+    energy = math.sqrt(sum(v * v for v in csi_vals) / len(csi_vals)) if csi_vals else 0.0
+    if csi_vals and len(csi_vals) > 1:
+        var = sum((v - mean) ** 2 for v in csi_vals) / len(csi_vals)
+        spread = math.sqrt(var)
+    else:
+        spread = 0.0
+
+    meta = {
+        "source": "wifi_csi",
+        "type": data.get("type", "wifi_csi"),
+        "subcarriers": len(csi_vals),
+    }
+
+    return [
+        Observation(timestamp, node, "rssi", _rssi_norm(rssi), 1.0, {**meta, "rssi_dbm": rssi}),
+        Observation(timestamp, node, "csi_mean", max(0.0, min(1.0, mean)), 0.95, meta),
+        Observation(timestamp, node, "csi_peak", max(0.0, min(1.0, peak)), 0.95, meta),
+        Observation(timestamp, node, "csi_energy", max(0.0, min(1.0, energy)), 0.9, meta),
+        Observation(timestamp, node, "csi_spread", max(0.0, min(1.0, spread * 2.0)), 0.85, meta),
+    ]
+
+
+def parse_line(line: str) -> list[Observation]:
+    """Parse one JSON line into zero or more Observations."""
     line = line.strip()
     if not line:
-        return None
+        return []
     try:
         data = json.loads(line)
-        return Observation(
-            timestamp=str(data.get("timestamp", "")),
-            body_id=str(data.get("body_id", "unknown")),
-            region=str(data.get("region", "unknown")),
-            value=float(data.get("value", 0.0)),
-            confidence=float(data.get("confidence", 1.0)),
-            meta=data.get("meta"),
-        )
-    except (json.JSONDecodeError, TypeError, ValueError, KeyError):
-        return None
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return []
+
+    if not isinstance(data, dict):
+        return []
+
+    # Canonical CSI from CYD / standard / ESP-NOW gateway
+    if data.get("type") == "wifi_csi" or ("csi" in data and "node" in data):
+        return _from_wifi_csi(data)
+
+    # FieldObservation (already canonical)
+    try:
+        return [
+            Observation(
+                timestamp=str(data.get("timestamp", _now_iso())),
+                body_id=str(data.get("body_id", "unknown")),
+                region=str(data.get("region", "unknown")),
+                value=float(data.get("value", 0.0)),
+                confidence=float(data.get("confidence", 1.0)),
+                meta=data.get("meta"),
+            )
+        ]
+    except (TypeError, ValueError):
+        return []
 
 
 def tail_file(path: Path, from_start: bool = False) -> Iterator[str]:
-    """Robust non-blocking tail. Handles file recreation / rotation."""
     path = Path(path)
     while True:
         try:
@@ -43,7 +115,6 @@ def tail_file(path: Path, from_start: bool = False) -> Iterator[str]:
                     f.seek(0, 2)
                 else:
                     from_start = False
-
                 while True:
                     line = f.readline()
                     if line:
@@ -67,7 +138,6 @@ def stdin_lines() -> Iterator[str]:
 
 
 def udp_lines(host: str = "0.0.0.0", port: int = 4210) -> Iterator[str]:
-    """Listen for JSON lines on UDP (Echo Grid CSI uses 4210)."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind((host, port))
@@ -92,14 +162,10 @@ def multi_source(
     udp_port: int | None = None,
     from_start: bool = False,
 ) -> Iterator[Observation]:
-    """Merge file / stdin / UDP sources into one Observation stream."""
-
-    # Fast path: pure stdin (demo pipe, or `... | throne`)
     only_stdin = use_stdin and not files and udp_port is None
     if only_stdin:
         for line in stdin_lines():
-            obs = parse_line(line)
-            if obs:
+            for obs in parse_line(line):
                 yield obs
         return
 
@@ -116,20 +182,14 @@ def multi_source(
         sources.append(udp_lines(port=udp_port))
 
     if not sources:
-        # Waiting state — still attach stdin so the UI can sit idle
         sources.append(stdin_lines())
 
-    # Round-robin. Blocking sources (stdin) only appear when data is present
-    # because file/UDP iterators sleep themselves when idle.
     while True:
         made_progress = False
         for it in sources:
             try:
-                # Non-blocking style: only pull if the iterator is ready.
-                # For generators that block, this is still fine at demo rates.
                 line = next(it)
-                obs = parse_line(line)
-                if obs:
+                for obs in parse_line(line):
                     yield obs
                     made_progress = True
             except StopIteration:
