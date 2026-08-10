@@ -1,2 +1,36 @@
-# throne-room
-Unified live Field Observer / Throne Room for the MetaField stack. Ingests FieldObservation streams (optical, ultrasonic, CSI, Hall, ZVS…) + MetaField latents, attractors, and active probes into one coherent view.
+# Throne Room
+
+**Unified live Field Observer for the MetaField stack.**
+
+The single place to watch the whole organism:
+
+- Every `FieldObservation` stream (optical, ultrasonic/Echo, CSI, Hall, ZVS…)
+- MetaField latent geometry, attractors, prediction error
+- Active probe suggestions and closed-loop decisions
+
+One coherent view instead of a pile of separate terminals.
+
+---
+
+## Status
+
+**v0 skeleton** — just created.  
+Next: observation simulator + first live ingest path.
+
+## Design Intent
+
+- Hardware-optional (ships with a solid simulator so it feels alive immediately)
+- Same `FieldObservation` schema already used by `optical-body-s3`, Echo Grid, etc.
+- Fast enough to feel real-time
+- Clear visual hierarchy: bodies → field state → MetaField mind
+
+## Quick Links
+
+- [MetaField](https://github.com/TheBabelDragon/metafield)
+- [Echo Grid Ultrasonic OS](https://github.com/TheBabelDragon/echo-grid-ultrasonic-os)
+- [field-bus](https://github.com/TheBabelDragon/field-bus)
+- [optical-body-s3](https://github.com/TheBabelDragon/optical-body-s3)
+
+---
+
+*The control surface for a distributed physical-field intelligence.*
