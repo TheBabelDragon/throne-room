@@ -21,17 +21,15 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import sys
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 try:
-    from .ingest import multi_source, parse_line, udp_lines, tail_file, _from_wifi_csi
+    from .ingest import parse_line, udp_lines, tail_file, _from_wifi_csi
 except ImportError:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from ingest import multi_source, parse_line, udp_lines, tail_file, _from_wifi_csi  # type: ignore
+    from ingest import parse_line, udp_lines, tail_file, _from_wifi_csi  # type: ignore
 
 
 def _now() -> str:
@@ -73,7 +71,18 @@ def wifi_csi_dict_to_metafield(data: dict) -> dict:
     """Direct wifi_csi JSON → canonical MetaField FieldObservation."""
     rows = _from_wifi_csi(data)
     packet = flat_obs_to_metafield_packet(rows)
-    assert packet is not None
+    if packet is None:
+        return {
+            "schema_version": 1,
+            "body_id": str(data.get("node") or "csi-unknown"),
+            "body_type": "wifi_csi",
+            "excitation_id": None,
+            "field_regions": [],
+            "geometry_state": "unknown",
+            "timestamp": _now(),
+            "modality": {"wifi_csi": {"error": "empty_expand"}},
+            "health": "error",
+        }
     # keep raw subcarriers in modality for later geometry / replay
     csi = data.get("csi") or []
     packet["modality"] = {
@@ -120,7 +129,6 @@ def main() -> None:
     out = args.out.open("a", encoding="utf-8")
     count = 0
 
-    # Prefer raw line access so we can detect wifi_csi vs flat FO
     def raw_lines():
         if args.udp is not None:
             yield from udp_lines(port=args.udp)
@@ -149,10 +157,8 @@ def main() -> None:
             if data.get("type") == "wifi_csi" or ("csi" in data and "node" in data):
                 packet = wifi_csi_dict_to_metafield(data)
             elif "field_regions" in data and "body_id" in data:
-                # already canonical MetaField
                 packet = data
             else:
-                # flat Throne-style single region
                 rows = parse_line(line)
                 packet = flat_obs_to_metafield_packet(rows)
                 if packet is None:
