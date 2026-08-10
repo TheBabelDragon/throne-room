@@ -6,20 +6,17 @@ Wires observation path → MetaField digest → Aurora-facing status
 even when no higher-level controller exists.
 
 Stages:
-  1. prepare runtime dirs
+  1. prepare runtime dirs + measurement banner
   2. bind CSI uplink (metafield_bridge owns UDP :4210)
   3. optional Throne live view (tails the same JSONL)
   4. optional MetaField consumer (FieldObservation → FieldMemoryEntry)
-  5. Aurora digest loop (read-only stats + obs health; fail-closed)
+  5. digest loop (health + field_pressure + host_guard)
   6. optional Aurora action layer (--action)
 
 Usage:
-
   python -m observer.startup
-  python -m observer.startup --action
-  python -m observer.startup --action --action-mode cautious
-  python -m observer.startup --no-view
-  python -m observer.startup --metafield-root ~/projects/metafield
+  python -m observer.startup --action --action-file-only
+  python -m observer.startup --no-view --no-consumer
 """
 
 from __future__ import annotations
@@ -41,6 +38,11 @@ DEFAULT_OUT = Path("/tmp/metafield/csi.jsonl")
 DEFAULT_MEMORY = Path("/tmp/metafield/field_memory.jsonl")
 DEFAULT_DIGEST = Path("/tmp/metafield/obs_digest.json")
 DEFAULT_STATS = Path("/tmp/metafield/stats.json")
+
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+if str(ROOT / "observer") not in sys.path:
+    sys.path.insert(0, str(ROOT / "observer"))
 
 
 def _now() -> str:
@@ -107,6 +109,64 @@ def _discover_metafield(explicit: Path | None) -> Path | None:
     return None
 
 
+def _count_lines(path: Path) -> int:
+    if not path.exists():
+        return 0
+    try:
+        with path.open("rb") as f:
+            return sum(1 for _ in f)
+    except OSError:
+        return 0
+
+
+def _tail_packets(path: Path, max_lines: int = 200) -> list[dict]:
+    if not path.exists():
+        return []
+    try:
+        with path.open("rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            data = b""
+            block = 65536
+            while size > 0 and len(data) < max_lines * 256:
+                read = min(block, size)
+                size -= read
+                f.seek(size)
+                data = f.read(read) + data
+            lines = data.splitlines()[-max_lines:]
+    except OSError:
+        return []
+    out: list[dict] = []
+    for raw in lines:
+        try:
+            obj = json.loads(raw.decode("utf-8", errors="replace"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if isinstance(obj, dict):
+            out.append(obj)
+    return out
+
+
+def _update_cubes(ensemble: Any, packets: list[dict]) -> dict:
+    for pkt in packets:
+        body = str(pkt.get("body_id") or "")
+        if not body:
+            continue
+        regions: dict[str, float] = {}
+        for r in pkt.get("field_regions") or []:
+            if not isinstance(r, dict):
+                continue
+            name = str(r.get("region") or "")
+            try:
+                regions[name] = float(r.get("observed") or 0.0)
+            except (TypeError, ValueError):
+                continue
+        if regions:
+            ensemble.observe(body, regions)
+    ensemble.decay_all(0.997)
+    return ensemble.snapshot()
+
+
 def _write_digest(
     path: Path,
     *,
@@ -115,6 +175,9 @@ def _write_digest(
     memory_jsonl: Path,
     packet_lines: int,
     memory_lines: int,
+    field_snap: dict | None = None,
+    host_snap: dict | None = None,
+    measurement: dict | None = None,
 ) -> dict[str, Any]:
     child_state = {
         c.name: {
@@ -133,12 +196,15 @@ def _write_digest(
         except Exception:
             mf_stats = {"health": "unreadable"}
 
+    if host_snap and host_snap.get("stressed"):
+        healthy = False
+
     digest = {
         "schema_version": 1,
         "type": "OBS_PATH_DIGEST",
         "timestamp": _now(),
         "source": "throne-room.control",
-        "aurora_rev": "file-digest-v1+action",
+        "aurora_rev": "file-digest-v2+pressure+host",
         "health": "ok" if healthy else "degraded",
         "obs_path": {
             "csi_jsonl": str(out_jsonl),
@@ -148,6 +214,9 @@ def _write_digest(
             "udp_owner": "metafield_bridge",
         },
         "children": child_state,
+        "field": field_snap or {},
+        "host": host_snap or {},
+        "measurement": measurement or {},
         "metafield_stats": {
             "health": mf_stats.get("health", "no_export"),
             "traj": mf_stats.get("traj"),
@@ -158,16 +227,6 @@ def _write_digest(
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(digest, indent=2))
     return digest
-
-
-def _count_lines(path: Path) -> int:
-    if not path.exists():
-        return 0
-    try:
-        with path.open("rb") as f:
-            return sum(1 for _ in f)
-    except OSError:
-        return 0
 
 
 def main() -> None:
@@ -182,31 +241,50 @@ def main() -> None:
     parser.add_argument("--no-view", action="store_true")
     parser.add_argument("--no-consumer", action="store_true")
     parser.add_argument("--digest-interval", type=float, default=5.0)
-    parser.add_argument(
-        "--action",
-        action="store_true",
-        help="Start Aurora autonomous action layer",
-    )
+    parser.add_argument("--action", action="store_true")
     parser.add_argument(
         "--action-mode",
         choices=("observe", "cautious", "auto"),
         default="cautious",
-        help="Aurora mode when --action is set",
     )
-    parser.add_argument(
-        "--action-file-only",
-        action="store_true",
-        help="Aurora journals intents without Redis dispatch",
-    )
+    parser.add_argument("--action-file-only", action="store_true")
     args = parser.parse_args()
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.memory.parent.mkdir(parents=True, exist_ok=True)
     args.digest.parent.mkdir(parents=True, exist_ok=True)
 
+    try:
+        from measurement import FINE_LEN, SAMPLE_HZ, WINDOW_S, standard_banner
+    except ImportError:
+        from observer.measurement import FINE_LEN, SAMPLE_HZ, WINDOW_S, standard_banner  # type: ignore
+
+    try:
+        from field_cube import FieldCubeEnsemble
+    except ImportError:
+        from observer.field_cube import FieldCubeEnsemble  # type: ignore
+
+    try:
+        from host_guard import snapshot as host_snapshot
+    except ImportError:
+        from observer.host_guard import snapshot as host_snapshot  # type: ignore
+
+    print(f"[control] {standard_banner()}", flush=True)
+
+    ensemble = FieldCubeEnsemble()
+    measurement_meta = {
+        "sample_hz": SAMPLE_HZ,
+        "window_s": WINDOW_S,
+        "fine_len": FINE_LEN,
+    }
+
     env = os.environ.copy()
     env["PYTHONPATH"] = (
-        str(ROOT) + os.pathsep + str(ROOT / "observer") + os.pathsep + env.get("PYTHONPATH", "")
+        str(ROOT)
+        + os.pathsep
+        + str(ROOT / "observer")
+        + os.pathsep
+        + env.get("PYTHONPATH", "")
     )
 
     children: list[Child] = []
@@ -353,6 +431,15 @@ def main() -> None:
 
             now = time.time()
             if now - last_digest >= args.digest_interval:
+                packets = _tail_packets(args.out, max_lines=min(400, FINE_LEN))
+                field_snap = _update_cubes(ensemble, packets)
+                hs = host_snapshot()
+                host_snap = {
+                    "cpu_pct": round(hs.cpu_pct, 1),
+                    "mem_pct": round(hs.mem_pct, 1),
+                    "stressed": hs.stressed,
+                    "advice": hs.advice,
+                }
                 digest = _write_digest(
                     args.digest,
                     children=children,
@@ -360,6 +447,9 @@ def main() -> None:
                     memory_jsonl=args.memory,
                     packet_lines=_count_lines(args.out),
                     memory_lines=_count_lines(args.memory),
+                    field_snap=field_snap,
+                    host_snap=host_snap,
+                    measurement=measurement_meta,
                 )
                 if aurora_tick is not None and not aurora_tick_failed:
                     try:
@@ -370,8 +460,11 @@ def main() -> None:
 
                 print(
                     f"[control] digest health={digest['health']}  "
-                    f"csi_lines={digest['obs_path']['csi_lines']}  "
-                    f"memory_lines={digest['obs_path']['memory_lines']}",
+                    f"csi={digest['obs_path']['csi_lines']}  "
+                    f"mem={digest['obs_path']['memory_lines']}  "
+                    f"pressure={field_snap.get('pressure', 0):.3f}  "
+                    f"host={host_snap['advice']}  "
+                    f"bodies={field_snap.get('n_bodies', 0)}",
                     flush=True,
                 )
                 last_digest = now
@@ -388,6 +481,7 @@ def main() -> None:
             memory_jsonl=args.memory,
             packet_lines=_count_lines(args.out),
             memory_lines=_count_lines(args.memory),
+            measurement=measurement_meta,
         )
         print("[control] stopped", flush=True)
 
