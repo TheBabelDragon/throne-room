@@ -3,7 +3,7 @@
 Throne Room – operational live Field Observer
 
 Renders a live Rich dashboard of real FieldObservation streams.
-Supports file, stdin, and UDP (Echo Grid compatible on 4210).
+Battleship-style time sparks show measurement intensity over time.
 """
 
 from __future__ import annotations
@@ -34,6 +34,50 @@ def _is_synthetic(obs: Observation) -> bool:
         return False
     src = str(obs.meta.get("source", "")).lower()
     return src in {"sim", "synthetic"} or bool(obs.meta.get("dev_only"))
+
+
+def _intensity_style(v: float) -> str:
+    if v >= 0.85:
+        return "bold bright_green"
+    if v >= 0.65:
+        return "green"
+    if v >= 0.40:
+        return "yellow"
+    if v >= 0.20:
+        return "dark_orange3"
+    return "bright_black"
+
+
+def _battle_spark(hist: RegionHistory | None) -> Text:
+    """Coloured battleship time-grid of measurement intensity."""
+    text = Text()
+    if not hist or not hist.values:
+        text.append("·" * 16, style="bright_black")
+        return text
+    for glyph, intensity in hist.cells():
+        text.append(glyph, style=_intensity_style(intensity))
+    return text
+
+
+def _empty_fleet_board() -> Text:
+    """Beautiful idle load — empty battleship grids awaiting contact."""
+    rows = [
+        "    A B C D E F G H I J K L M N O P",
+        "  1 · · · · · · · · · · · · · · · ·",
+        "  2 · · · · · · · · · · · · · · · ·",
+        "  3 · · · · · · · · · · · · · · · ·",
+        "  4 · · · · · · · · · · · · · · · ·",
+        "  5 · · · · · · · · · · · · · · · ·",
+        "  6 · · · · · · · · · · · · · · · ·",
+        "  7 · · · · · · · · · · · · · · · ·",
+        "  8 · · · · · · · · · · · · · · · ·",
+    ]
+    t = Text()
+    t.append("awaiting real field contact\n", style="dim cyan")
+    t.append("\n".join(rows), style="bright_black")
+    t.append("\n\n", style="")
+    t.append("UDP :4210  ·  JSONL file  ·  live body stdin", style="dim")
+    return t
 
 
 class ThroneRoom:
@@ -80,8 +124,6 @@ class ThroneRoom:
         active = sum(1 for b in self.bodies.values() if now - b.last_seen < 5.0)
         stalled = sum(1 for b in self.bodies.values() if now - b.last_seen >= 5.0)
 
-        warn = "  [yellow]synthetic traffic detected[/]" if self.synthetic_seen else ""
-
         header.add_row(
             Text("THRONE ROOM", style="bold magenta"),
             Text(
@@ -123,12 +165,12 @@ class ThroneRoom:
             )
             table.add_column("region", style="white", min_width=10)
             table.add_column("value", justify="right", min_width=7)
-            table.add_column("spark", min_width=14)
+            table.add_column("time →", min_width=18)
             table.add_column("conf", justify="right", min_width=5)
 
             for region, obs in sorted(state.regions.items()):
                 hist = state.history.get(region)
-                spark = hist.sparkline() if hist else ""
+                spark = _battle_spark(hist)
 
                 if obs.value > 0.7:
                     val_style = "bold green"
@@ -140,7 +182,7 @@ class ThroneRoom:
                 table.add_row(
                     region,
                     Text(f"{obs.value:.3f}", style=val_style),
-                    Text(spark, style="bright_black"),
+                    spark,
                     f"{obs.confidence:.2f}",
                 )
 
@@ -153,9 +195,10 @@ class ThroneRoom:
         if not self.bodies:
             panels.append(
                 Panel(
-                    "[dim]waiting for real FieldObservation packets…\n"
-                    "  UDP :4210  ·  JSONL file  ·  stdin from a live body[/]",
-                    border_style="dim",
+                    _empty_fleet_board(),
+                    title="[dim]fleet grid[/]",
+                    border_style="blue",
+                    padding=(1, 2),
                 )
             )
 
