@@ -9,6 +9,7 @@ Supports file, stdin, and UDP (Echo Grid compatible on 4210).
 from __future__ import annotations
 
 import argparse
+import sys
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -19,8 +20,14 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from .ingest import multi_source
-from .models import BodyState, Observation, RegionHistory
+# Support both `python -m observer.live_view` and direct script execution
+try:
+    from .ingest import multi_source
+    from .models import BodyState, Observation, RegionHistory
+except ImportError:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from ingest import multi_source  # type: ignore
+    from models import BodyState, Observation, RegionHistory  # type: ignore
 
 
 class ThroneRoom:
@@ -65,7 +72,10 @@ class ThroneRoom:
 
         header.add_row(
             Text("THRONE ROOM", style="bold magenta"),
-            Text(f"{active} active  ·  {stalled} stalled  ·  {self.rate_hz:.1f} Hz", style="cyan"),
+            Text(
+                f"{active} active  ·  {stalled} stalled  ·  {self.rate_hz:.1f} Hz",
+                style="cyan",
+            ),
             Text(f"pkts {self.total_packets}   up {uptime:.0f}s", style="dim"),
         )
 
@@ -75,14 +85,11 @@ class ThroneRoom:
             age = now - state.last_seen
 
             if age < 2.0:
-                age_style = "green"
-                border = "green"
+                age_style, border = "green", "green"
             elif age < 8.0:
-                age_style = "yellow"
-                border = "yellow"
+                age_style, border = "yellow", "yellow"
             else:
-                age_style = "red"
-                border = "red"
+                age_style, border = "red", "red"
 
             table = Table(
                 show_header=True,
@@ -114,7 +121,10 @@ class ThroneRoom:
                     f"{obs.confidence:.2f}",
                 )
 
-            title = f"[bold]{body_id}[/]  [{age_style}]●[/]  [dim]{state.packet_count} pkts[/]"
+            title = (
+                f"[bold]{body_id}[/]  [{age_style}]●[/]  "
+                f"[dim]{state.packet_count} pkts[/]"
+            )
             panels.append(Panel(table, title=title, border_style=border, padding=(0, 1)))
 
         if not panels:
@@ -132,7 +142,6 @@ class ThroneRoom:
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Throne Room – operational live Field Observer",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "--file", "-f",
@@ -173,13 +182,19 @@ def main() -> None:
         from_start=args.from_start,
     )
 
-    with Live(throne.render(), console=console, refresh_per_second=10, screen=False) as live:
-        try:
+    try:
+        with Live(
+            throne.render(),
+            console=console,
+            refresh_per_second=10,
+            screen=False,
+        ) as live:
             for obs in source:
                 throne.ingest(obs)
                 live.update(throne.render())
-        except KeyboardInterrupt:
-            console.print("\n[dim]Throne Room closed.[/]")
+    except KeyboardInterrupt:
+        console.print("\n[dim]Throne Room closed.[/]")
+        sys.exit(0)
 
 
 if __name__ == "__main__":
