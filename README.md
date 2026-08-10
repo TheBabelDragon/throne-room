@@ -14,8 +14,17 @@ One coherent view instead of a pile of separate terminals.
 
 ## Status
 
-**v0 skeleton** — just created.  
-Next: observation simulator + first live ingest path.
+**v0.1** — skeleton + working FieldObservation simulator.
+
+```bash
+# fire synthetic bodies
+python simulator/field_observation_sim.py
+
+# or write to a JSONL file MetaField can already consume
+python simulator/field_observation_sim.py --file /tmp/throne.jsonl
+```
+
+Next up: live ingest + first visual surface.
 
 ## Design Intent
 
