@@ -12,13 +12,16 @@ Pre-tuned defaults (not placeholders):
   THRONE_WINDOW_S       fine analysis window (s)   (default 90)
   THRONE_SPARK_CELLS    TUI spark display cells     (default 64)
   THRONE_DISPLAY_S      torch-display history (s)   (default 150)
+  THRONE_HEAD_WINDOW_S  online head temporal span  (default 12)
 
 Derived:
-  FINE_LEN    = ceil(SAMPLE_HZ * WINDOW_S)     # full-fidelity ring
+  FINE_LEN    = ceil(SAMPLE_HZ * WINDOW_S)       # full-fidelity ring
   DISPLAY_LEN = ceil(SAMPLE_HZ * DISPLAY_S)
+  HEAD_LEN    = ceil(SAMPLE_HZ * HEAD_WINDOW_S)  # learner sees real seconds
 
-Multi-head field pooling (see multi_head_field.py) uses the same
-window so head residuals and sparklines stay time-aligned.
+High-tune value preserved: never a placeholder integer cap.
+Obscure limit fixed: head no longer stuck at magic window=12 samples
+while the rest of the stack thinks in 90s fine windows.
 """
 
 from __future__ import annotations
@@ -41,26 +44,27 @@ def _env_int(name: str, default: int) -> int:
     return max(1, int(round(_env_float(name, float(default)))))
 
 
-# Pre-tuned for live CSI swarm (CYD × bridges × host)
 SAMPLE_HZ: float = _env_float("THRONE_SAMPLE_HZ", 8.0)
 WINDOW_S: float = _env_float("THRONE_WINDOW_S", 90.0)
 DISPLAY_S: float = _env_float("THRONE_DISPLAY_S", 150.0)
+HEAD_WINDOW_S: float = _env_float("THRONE_HEAD_WINDOW_S", 12.0)
 SPARK_CELLS: int = _env_int("THRONE_SPARK_CELLS", 64)
 
-# Full-fidelity rings — never a small placeholder
 FINE_LEN: int = max(128, int(math.ceil(SAMPLE_HZ * WINDOW_S)))
 DISPLAY_LEN: int = max(FINE_LEN, int(math.ceil(SAMPLE_HZ * DISPLAY_S)))
+HEAD_LEN: int = max(24, min(FINE_LEN, int(math.ceil(SAMPLE_HZ * HEAD_WINDOW_S))))
 
-# Policy / multi-head tail: one full fine window
 POLICY_TAIL_LINES: int = FINE_LEN
 
-# Multi-head field geometry (substance, not LLM toy dims)
 FIELD_HEADS: int = _env_int("THRONE_FIELD_HEADS", 8)
 FIELD_SUBCARRIERS: int = _env_int("THRONE_FIELD_SC", 32)
 
+HEAD_STATE_PATH_DEFAULT = "/tmp/metafield/head_state.json"
+AURORA_BASE_COOLDOWN_S: float = _env_float("THRONE_AURORA_COOLDOWN", 5.0)
+AURORA_DECIDE_INTERVAL_S: float = _env_float("THRONE_AURORA_INTERVAL", 1.25)
+
 
 def decimate(values: list[float], cells: int = SPARK_CELLS) -> list[float]:
-    """Downsample a fine ring to a display-width series (mean bins)."""
     if not values:
         return []
     if len(values) <= cells:
@@ -78,5 +82,6 @@ def decimate(values: list[float], cells: int = SPARK_CELLS) -> list[float]:
 def standard_banner() -> str:
     return (
         f"measurement: {SAMPLE_HZ:g} Hz × {WINDOW_S:g}s = {FINE_LEN} samples  "
-        f"spark={SPARK_CELLS}  display={DISPLAY_LEN}  heads={FIELD_HEADS}"
+        f"spark={SPARK_CELLS}  display={DISPLAY_LEN}  "
+        f"head={HEAD_LEN} ({HEAD_WINDOW_S:g}s)  heads={FIELD_HEADS}"
     )
