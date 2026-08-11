@@ -20,6 +20,7 @@ DEFAULT_OUT = Path("/tmp/metafield/csi.jsonl")
 DEFAULT_MEMORY = Path("/tmp/metafield/field_memory.jsonl")
 DEFAULT_DIGEST = Path("/tmp/metafield/obs_digest.json")
 DEFAULT_STATS = Path("/tmp/metafield/stats.json")
+DEFAULT_SHARED_BODIES = Path("/tmp/metafield/shared_bodies.json")
 
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -226,7 +227,7 @@ def _write_digest(
         "type": "OBS_PATH_DIGEST",
         "timestamp": _now(),
         "source": "throne-room.control",
-        "aurora_rev": "file-digest-v3+fo_mem",
+        "aurora_rev": "file-digest-v3+fo_mem+shared_body",
         "health": "ok" if healthy else "degraded",
         "obs_path": {
             "csi_jsonl": str(out_jsonl),
@@ -237,6 +238,7 @@ def _write_digest(
             "memory_active": mem["active"],
             "memory_status": mem["status"],
             "udp_owner": "metafield_bridge",
+            "shared_bodies": str(DEFAULT_SHARED_BODIES),
         },
         "children": child_state,
         "field": field_snap or {},
@@ -274,6 +276,29 @@ def _read_head_snap() -> dict[str, Any]:
         }
     except Exception:
         return {}
+
+
+def _export_shared_bodies(
+    packets: list[dict],
+    field_snap: dict,
+    head_snap: dict,
+) -> int:
+    """Write SHARED_BODY_SET for Reverie / external consumers. Fail-soft."""
+    try:
+        try:
+            from shared_body import export_from_digest_inputs
+        except ImportError:
+            from observer.shared_body import export_from_digest_inputs  # type: ignore
+        env = export_from_digest_inputs(
+            packets=packets,
+            field_snap=field_snap,
+            head_snap=head_snap,
+            path=DEFAULT_SHARED_BODIES,
+        )
+        return int(env.get("n_bodies") or 0)
+    except Exception as e:
+        print(f"[control] shared_body export failed: {e}", flush=True)
+        return 0
 
 
 def main() -> None:
@@ -506,6 +531,7 @@ def main() -> None:
                     measurement=measurement_meta,
                     head_snap=head_snap,
                 )
+                n_shared = _export_shared_bodies(packets, field_snap, head_snap)
                 if aurora_tick is not None and not aurora_tick_failed:
                     try:
                         aurora_tick()
@@ -531,7 +557,8 @@ def main() -> None:
                     f"{fo_mem}  "
                     f"pressure={field_snap.get('pressure', 0):.3f}  "
                     f"host={host_snap['advice']}  "
-                    f"bodies={field_snap.get('n_bodies', 0)}"
+                    f"bodies={field_snap.get('n_bodies', 0)}  "
+                    f"shared={n_shared}"
                     f"{head_bit}",
                     flush=True,
                 )
