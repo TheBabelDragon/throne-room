@@ -65,6 +65,9 @@ class World:
         """Follow live JSONL. Does not bind UDP. Returns warmup ingest counts."""
         if csi is not None or aurora is not None:
             self.live = True
+        if ticks is not None and not isinstance(ticks, Path):
+            raise TypeError(f"ticks journal must be a Path, got {type(ticks).__name__}")
+        self.ticks_path = ticks
         counts = {"csi": 0, "aurora": 0}
         if csi is not None:
             self.csi_cursor = JsonlCursor(csi)
@@ -76,19 +79,24 @@ class World:
             for pkt in self.aurora_cursor.catch_up_keep(warmup):
                 if self.observe_aurora(pkt):
                     counts["aurora"] += 1
-        self.ticks_path = ticks
         return counts
 
     def drain_feeds(self) -> dict[str, int]:
         counts = {"csi": 0, "aurora": 0}
         if self.csi_cursor is not None:
             for pkt in self.csi_cursor.poll():
-                if self.ingest_packet(pkt):
-                    counts["csi"] += 1
+                try:
+                    if self.ingest_packet(pkt):
+                        counts["csi"] += 1
+                except Exception:
+                    continue
         if self.aurora_cursor is not None:
             for pkt in self.aurora_cursor.poll():
-                if self.observe_aurora(pkt):
-                    counts["aurora"] += 1
+                try:
+                    if self.observe_aurora(pkt):
+                        counts["aurora"] += 1
+                except Exception:
+                    continue
         return counts
 
     def step(self, obs: FieldObservation | None = None, *, force_synthetic: bool = False) -> None:
@@ -260,10 +268,11 @@ class World:
             "aurora_seen": self.aurora_seen,
             "csi_body": None if self.last_obs is None else self.last_obs.body_id,
             "csi_synthetic": None if self.last_obs is None else self.last_obs.synthetic,
+            "csi_rssi": None if self.last_obs is None else self.last_obs.rssi_dbm,
         }
 
     def _journal_tick(self, sequence: int) -> None:
-        if self.ticks_path is None:
+        if not isinstance(self.ticks_path, Path):
             return
         tick = self.scheduler.last
         summary = tick_summary(tick) if tick else {}

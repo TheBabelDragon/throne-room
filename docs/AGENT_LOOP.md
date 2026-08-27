@@ -95,6 +95,9 @@ python -m observer.startup --full
 python -m agent.chat --live --follow
 ```
 
+`--ticks N` is a synthetic warmup **count**. `--journal PATH` is the FieldTick JSONL.
+`--live --follow` tails CSI/Aurora; it never binds UDP :4210.
+
 `--live` tails `/tmp/metafield/csi.jsonl` and `aurora_actions.jsonl`. Aurora probes
 commit **local** FieldDeltas so SELF sees them. Redis ESCAPE still gates hardware.
 

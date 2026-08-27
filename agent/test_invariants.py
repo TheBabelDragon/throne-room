@@ -7,8 +7,12 @@
 from __future__ import annotations
 
 import json
+import os
+import signal
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -231,6 +235,62 @@ class FeedTests(unittest.TestCase):
             self.assertEqual(rec["schema"], "metafield.tick")
             self.assertEqual(rec["sequence"], 1)
             self.assertEqual(rec["hash"], world.last_hash)
+
+    def test_int_ticks_path_does_not_crash(self) -> None:
+        world = World()
+        world.ticks_path = 4  # type: ignore[assignment]
+        world.step()
+        self.assertEqual(world.scheduler.sequence, 1)
+
+    def test_attach_feeds_rejects_int_journal(self) -> None:
+        world = World()
+        with self.assertRaises(TypeError):
+            world.attach_feeds(ticks=4)  # type: ignore[arg-type]
+
+    def test_cli_live_follow_ticks_flag_is_not_a_path(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            csi = Path(td) / "csi.jsonl"
+            aurora = Path(td) / "aurora.jsonl"
+            journal = Path(td) / "ticks.jsonl"
+            pkt = {"type": "wifi_csi", "node": "cyd-a", "rssi": -51, "csi": [0.3] * 32}
+            csi.write_text(json.dumps(pkt) + "\n")
+            aurora.write_text("")
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(ROOT)
+            proc = subprocess.Popen(
+                [
+                    sys.executable, "-m", "agent.chat",
+                    "--live", "--follow", "--interval", "0.05",
+                    "--csi", str(csi), "--aurora", str(aurora),
+                    "--journal", str(journal), "--ticks", "4", "--warmup", "8",
+                ],
+                cwd=str(ROOT),
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            try:
+                time.sleep(0.35)
+                with csi.open("a") as fh:
+                    fh.write(json.dumps({
+                        "type": "wifi_csi", "node": "cyd-b", "rssi": -47, "csi": [0.5] * 32,
+                    }) + "\n")
+                    fh.flush()
+                time.sleep(0.45)
+                proc.send_signal(signal.SIGINT)
+                out, _ = proc.communicate(timeout=8)
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait(timeout=3)
+                    out = proc.stdout.read() if proc.stdout else ""
+            self.assertNotIn("AttributeError", out)
+            self.assertIn("follow mode", out)
+            self.assertTrue(journal.exists())
+            recs = [json.loads(line) for line in journal.read_text().splitlines() if line.strip()]
+            self.assertGreaterEqual(len(recs), 1)
+            self.assertEqual(recs[0]["schema"], "metafield.tick")
 
 
 def main() -> None:

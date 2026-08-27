@@ -37,21 +37,21 @@ def _print_turn(world: World, label: str) -> None:
 
 
 def _attach(world: World, args: argparse.Namespace) -> None:
-    csi = args.csi
-    aurora = args.aurora
-    ticks = args.ticks
-    if args.live:
-        csi = csi or DEFAULT_CSI
-        aurora = aurora or DEFAULT_AURORA
-        ticks = ticks or DEFAULT_TICKS
-    if csi is None and aurora is None:
-        for _ in range(args.ticks):
+    if not args.live:
+        for _ in range(max(1, args.ticks)):
             world.step()
         return
-    counts = world.attach_feeds(csi=csi, aurora=aurora, ticks=ticks, warmup=max(args.ticks, 8))
+    csi = args.csi or DEFAULT_CSI
+    aurora = args.aurora or DEFAULT_AURORA
+    journal = args.journal or DEFAULT_TICKS
+    warmup = args.warmup if args.warmup is not None else 32
+    counts = world.attach_feeds(csi=csi, aurora=aurora, ticks=journal, warmup=warmup)
     print(
-        f"[agent] feeds  csi={csi or '-'}  aurora={aurora or '-'}  "
-        f"warmup csi={counts['csi']} aurora={counts['aurora']}",
+        f"[agent] live  csi={csi}  aurora={aurora}  journal={journal}",
+        flush=True,
+    )
+    print(
+        f"[agent] warmup  csi={counts['csi']} aurora={counts['aurora']}  keep-last={warmup}",
         flush=True,
     )
 
@@ -61,7 +61,9 @@ def main() -> None:
     parser.add_argument("--once", metavar="TEXT", help="Single utterance then exit")
     parser.add_argument("--csi", type=Path, default=None, help="FieldObservation / wifi_csi JSONL")
     parser.add_argument("--aurora", type=Path, default=None, help="aurora_actions.jsonl")
-    parser.add_argument("--ticks", type=int, default=4, help="Warmup ticks / CSI keep-last")
+    parser.add_argument("--journal", type=Path, default=None, help="Agent FieldTick JSONL (live default /tmp/metafield/agent_ticks.jsonl)")
+    parser.add_argument("--ticks", type=int, default=4, help="Offline synthetic warmup ticks (not a file path)")
+    parser.add_argument("--warmup", type=int, default=None, help="Live: keep-last CSI/Aurora lines (default 32)")
     parser.add_argument("--memory", type=Path, default=None)
     parser.add_argument("--live", action="store_true", help="Follow /tmp/metafield CSI + Aurora journals")
     parser.add_argument("--follow", action="store_true", help="Tick from feeds (no REPL). Ctrl+C to stop")
@@ -85,18 +87,43 @@ def main() -> None:
 
     if args.follow:
         print("[agent] follow mode — CSI/Aurora → FieldTick. No UDP bind.", flush=True)
+        beat = time.monotonic()
         try:
             while True:
-                got = world.drain_feeds()
+                try:
+                    got = world.drain_feeds()
+                except Exception as exc:
+                    print(f"[follow] drain error: {type(exc).__name__}: {exc}", flush=True)
+                    time.sleep(max(0.05, args.interval))
+                    continue
+                now = time.monotonic()
                 if got["csi"] or got["aurora"]:
                     snap = world.snapshot()
+                    rssi = snap.get("csi_rssi")
+                    rssi_s = f"{rssi:.1f}dBm" if isinstance(rssi, (int, float)) else "-"
                     print(
                         f"[follow] t{format_tick(snap['sequence'])}  "
                         f"csi+={got['csi']} aurora+={got['aurora']}  "
-                        f"E={snap['energy_sum']:.2f}  hash={snap['tick_hash']}  "
-                        f"body={snap['csi_body']}",
+                        f"E={snap['energy_sum']:.2f}  rssi={rssi_s}  "
+                        f"body={snap['csi_body'] or '-'}  hash={snap['tick_hash']}",
                         flush=True,
                     )
+                    if got["aurora"]:
+                        last_a = world.self.peek("working.last_aurora") or {}
+                        print(
+                            f"[aurora] {last_a.get('action', '?')}  "
+                            f"accepted={last_a.get('accepted')}  {last_a.get('reason', '')}",
+                            flush=True,
+                        )
+                    beat = now
+                elif now - beat >= 8.0:
+                    snap = world.snapshot()
+                    waiting = args.csi or DEFAULT_CSI
+                    print(
+                        f"[follow] idle  t{format_tick(snap['sequence'])}  waiting on {waiting}",
+                        flush=True,
+                    )
+                    beat = now
                 time.sleep(max(0.05, args.interval))
         except KeyboardInterrupt:
             print("\n[agent] stopped", flush=True)

@@ -105,6 +105,8 @@ python -m agent.chat --live --follow
 python -m agent.chat --live
 ```
 
+`--ticks` is a **count** (offline synthetic warmup). The journal path is `--journal` (default `/tmp/metafield/agent_ticks.jsonl`). Do not pass a file to `--ticks`.
+
 ### 3. Torch only
 
 ```bash

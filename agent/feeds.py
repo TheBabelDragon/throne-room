@@ -82,6 +82,8 @@ class JsonlCursor:
 
 
 def append_jsonl(path: Path, obj: dict[str, Any]) -> None:
+    if not isinstance(path, Path):
+        return
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as fh:
