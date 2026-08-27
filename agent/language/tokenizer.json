@@ -1,0 +1,26 @@
+{
+  "version": "arm-tok-v0",
+  "byte_size": 256,
+  "specials": [
+    "<PAD>",
+    "<BOS>",
+    "<EOS>",
+    "<UNK>",
+    "<SEP>",
+    "<OBSERVE>",
+    "<ATTEND>",
+    "<QUERY>",
+    "<REMEMBER>",
+    "<PROPOSE>",
+    "<SPEAK>",
+    "<WAIT>",
+    "<FIELD>",
+    "<USER>",
+    "<ARM>",
+    "<SELF>",
+    "<MEM>",
+    "<GOAL>",
+    "<CAP>"
+  ],
+  "vocab_size": 275
+}

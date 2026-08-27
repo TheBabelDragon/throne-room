@@ -138,6 +138,7 @@ def main() -> None:
     parser.add_argument("--memory", type=Path, default=None)
     parser.add_argument("--live", action="store_true", help="Follow /tmp/metafield CSI + Aurora journals")
     parser.add_argument("--follow", action="store_true", help="Tick from feeds (no REPL). Ctrl+C to stop")
+    parser.add_argument("--arm", choices=("teacher", "model"), default="teacher", help="Local language arm. teacher=structured policy, model=tiny decoder decode")
     parser.add_argument("--interval", type=float, default=0.25)
     args = parser.parse_args()
 
@@ -145,12 +146,16 @@ def main() -> None:
     if args.live and memory is None:
         memory = DEFAULT_MEMORY
     world = World(memory_path=memory)
+    world.arm.mode = args.arm  # type: ignore[assignment]
+    if args.live:
+        world.trajectory_path = Path("/tmp/metafield/arm_trajectories.jsonl")
     _attach(world, args)
 
     snap = world.snapshot()
     print(
         f"[agent] SELF online  t{format_tick(snap['sequence'])}  "
         f"integrity={snap['integrity']}  live={snap['live']}  "
+        f"arm={snap['arm_mode']} tok={snap['tokenizer']}  "
         f"caps={','.join(snap['capabilities'])}",
         flush=True,
     )

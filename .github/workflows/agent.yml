@@ -13,3 +13,5 @@ jobs:
           python-version: "3.11"
       - name: FieldTick / ABI / live-feed invariants
         run: python -m agent.test_invariants
+      - name: Language arm harness
+        run: python -m agent.language.harness --steps 8

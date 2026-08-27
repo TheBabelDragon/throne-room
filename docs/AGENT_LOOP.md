@@ -46,8 +46,9 @@ Chat is not a special architecture. It is the first actuator: modality
 | `operator_abi.py` | capability contract |
 | `self_state.py` | SELF adapter (canonical kernel: `self-state-kernel`) |
 | `bridge.py` | FieldObservation ↔ PerceptionEvent, Aurora Intent ↔ ActionProposal |
-| `loop.py` | perceive → self → reason → propose → validate → commit |
+| `loop.py` | perceive → self → language arm → propose → validate → commit |
 | `chat.py` | first human interface |
+| `language/` | local tokenizer, decoder, protocol, trajectories |
 
 The TypeScript HUD kernel that ran the same loop in Grok Build lives in
 `web/src/` so the contracts stay bilingual.
@@ -72,7 +73,9 @@ can observe it. `proposal_to_aurora_action` is a journal view, not a fire.
    directly.
 2. Systems inside the scheduler use no wall-clock and no RNG.
    `replay_to(n)` from genesis equals the live field at sequence n.
-3. LLM / mock reasoner runs *outside* the tick. Structured ActionProposal only.
+3. The language arm runs *outside* the tick. Local tokenizer + decoder
+   (or teacher policy). Structured ActionProposal only. No network in the
+   cognition loop.
 4. Synthetic CSI is a fixture (`dev/` energy, `make_synthetic_csi` here).
    Operational ingest remains real-measurement-only.
 5. Provenance: every CommittedAction carries proposal_id, observation_id,

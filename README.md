@@ -34,6 +34,15 @@ python -m agent.chat --live --follow
 
 `:snap` and `:step` work in the interactive REPL. Chat is an actuator — SPEAK, PROBE, REMEMBER, ATTEND are validated actions, not special cases.
 
+Local language arm (no API):
+
+```bash
+python -m agent.language.harness
+python -m agent.chat --arm teacher --once "What do you perceive?"
+```
+
+See [docs/LANGUAGE_ARM.md](docs/LANGUAGE_ARM.md). Tokenizer and protocol are owned here. Weights come later.
+
 Portable TypeScript twins of the same kernel: [`web/`](web/README.md).
 
 ---
@@ -173,7 +182,7 @@ python run.py --udp
 
 | Doc | Content |
 |-----|---------|
-| [docs/AGENT_LOOP.md](docs/AGENT_LOOP.md) | FieldTick · ABI · chat as actuator · Aurora mapping |
+| [docs/LANGUAGE_ARM.md](docs/LANGUAGE_ARM.md) | Local language arm protocol · tokenizer · trajectories |
 | [docs/CONTROL.md](docs/CONTROL.md) | Conductor + Aurora |
 | [docs/MEASUREMENT.md](docs/MEASUREMENT.md) | Fine windows |
 | [docs/SNAKE_PATH.md](docs/SNAKE_PATH.md) | CYD → host |

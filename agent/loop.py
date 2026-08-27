@@ -9,10 +9,12 @@ from typing import Any
 from agent.bridge import aurora_intent_to_proposal, packet_to_observation
 from agent.engine import FieldScheduler, seed_field, tick_summary
 from agent.feeds import JsonlCursor, append_jsonl
+from agent.language.arm import LanguageArm
+from agent.language.protocol import ConversationEvent, MemoryReference, context_from_world
+from agent.language.trajectories import append_trajectory, trajectory_record
 from agent.memory import MemoryStore
 from agent.operator_abi import AbiDecision, OperatorAbi
 from agent.perception import chat_perception, make_synthetic_csi, observation_to_perception
-from agent.reason import ReasoningContext, mock_reason
 from agent.schemas import ActionProposal, Channel, FieldObservation, PerceptionEvent
 from agent.self_state import create_self_state
 
@@ -46,6 +48,9 @@ class World:
         self.ticks_path: Path | None = None
         self.packets_ingested = 0
         self.aurora_seen = 0
+        self.arm = LanguageArm()
+        self.last_language_context = None
+        self.trajectory_path: Path | None = None
         self.messages: list[dict[str, Any]] = [
             {
                 "role": "system",
@@ -179,8 +184,10 @@ class World:
             observation_id=perception.id,
         )
 
-        ctx = self._reasoning_context(perception.id, trimmed)
-        proposal = mock_reason(ctx)
+        ctx = self._language_context(perception.id, trimmed)
+        self.last_language_context = ctx
+        output = self.arm.act(ctx)
+        proposal = output.proposal
         self.last_proposal = proposal
 
         decision = self.abi.validate(proposal, self.scheduler.field, self.scheduler.sequence + 1)
@@ -231,9 +238,25 @@ class World:
         self.self.SET("working.last_action", {
             "type": proposal.action_type,
             "accepted": decision.accepted,
-            "provider": "mock",
+            "provider": output.source,
+            "tokenizer": output.tokenizer_version,
         })
         self.step(None)
+        if self.trajectory_path is not None:
+            append_trajectory(
+                self.trajectory_path,
+                trajectory_record(
+                    ctx=ctx,
+                    output=output,
+                    sequence=self.scheduler.sequence,
+                    tick_hash=self.last_hash,
+                    world_response={
+                        "energy_sum": self.scheduler.field.sum(Channel.Energy),
+                        "info_sum": self.scheduler.field.sum(Channel.Information),
+                    },
+                    accepted=bool(decision.accepted),
+                ),
+            )
         return Turn(
             perception=perception,
             proposal=proposal,
@@ -270,6 +293,10 @@ class World:
             "csi_body": None if self.last_obs is None else self.last_obs.body_id,
             "csi_synthetic": None if self.last_obs is None else self.last_obs.synthetic,
             "csi_rssi": None if self.last_obs is None else self.last_obs.rssi_dbm,
+            "arm_mode": self.arm.mode,
+            "arm_source": None if self.arm.last is None else self.arm.last.source,
+            "arm_tokens": 0 if self.arm.last is None else len(self.arm.last.tokens),
+            "tokenizer": self.arm.tokenizer.version,
         }
 
     def _journal_tick(self, sequence: int) -> None:
@@ -288,14 +315,23 @@ class World:
             "synthetic": None if self.last_obs is None else self.last_obs.synthetic,
         })
 
-    def _reasoning_context(self, observation_id: str, user_text: str) -> ReasoningContext:
+    def _language_context(self, observation_id: str, user_text: str):
         field = self.scheduler.field
         peak, pval = field.peak(Channel.Energy)
         goals = self.self.peek("goals") or []
         energy = 0.0
         if self.last_obs:
             energy = next((r.observed for r in self.last_obs.regions if r.name == "csi_energy"), 0.0)
-        return ReasoningContext(
+        convo: list[ConversationEvent] = []
+        for m in self.messages[-8:]:
+            role = m.get("role")
+            mapped = "user" if role == "human" else ("arm" if role == "agent" else "system")
+            convo.append(ConversationEvent(role=mapped, text=str(m.get("text") or ""), tick=int(m.get("tick") or 0)))
+        mems = [
+            MemoryReference(id=e.id, tick=e.tick, text=e.text, kind=e.kind)
+            for e in self.memory.recent(4)
+        ]
+        return context_from_world(
             observation_id=observation_id,
             user_text=user_text,
             tick=self.scheduler.sequence,
@@ -306,7 +342,10 @@ class World:
             csi_energy=energy,
             csi_rssi=self.last_obs.rssi_dbm if self.last_obs else -90.0,
             integrity=self.self.integrity(),
+            body_id=None if self.last_obs is None else self.last_obs.body_id,
             goals=[g.get("text", "") for g in goals if isinstance(g, dict)],
             attention=str(self.self.peek("attention.target") or "chat"),
-            memories=[m.text for m in self.memory.recent(4)],
+            memories=mems,
+            capabilities=sorted(self.abi.capabilities),
+            conversation=convo,
         )

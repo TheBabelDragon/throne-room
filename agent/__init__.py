@@ -8,4 +8,4 @@ This package is the missing spine:
     PerceptionEvent → SelfState → ActionProposal → Operator ABI → FieldDelta → FieldTick
 """
 
-__version__ = "0.7.3"
+__version__ = "0.8.0"

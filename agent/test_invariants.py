@@ -24,6 +24,9 @@ from agent.bridge import aurora_intent_to_proposal, packet_to_observation, propo
 from agent.engine import FieldScheduler, seed_field
 from agent.feeds import JsonlCursor
 from agent.hashutil import canonical, fnv1a
+from agent.language.arm import LanguageArm
+from agent.language.tokenizer import ArmTokenizer, SPECIALS
+from agent.language.transformer import DecoderTransformer
 from agent.loop import World
 from agent.operator_abi import OperatorAbi, make_proposal
 from agent.perception import make_synthetic_csi
@@ -369,6 +372,52 @@ class FeedTests(unittest.TestCase):
             recs = [json.loads(line) for line in journal.read_text().splitlines() if line.strip()]
             self.assertGreaterEqual(len(recs), 1)
             self.assertEqual(recs[0]["schema"], "metafield.tick")
+
+
+class ArmTests(unittest.TestCase):
+    def test_tokenizer_owns_specials_and_roundtrip(self) -> None:
+        tok = ArmTokenizer()
+        for name in ("<OBSERVE>", "<ATTEND>", "<QUERY>", "<REMEMBER>", "<PROPOSE>", "<SPEAK>"):
+            self.assertIn(name, SPECIALS)
+            self.assertGreaterEqual(tok.special_id(name), 256)
+        text = "<BOS>hello <SPEAK>field<EOS>"
+        ids = tok.encode(text)
+        self.assertEqual(tok.decode(ids), text)
+        self.assertEqual(tok.version, "arm-tok-v0")
+
+    def test_transformer_is_local_and_deterministic(self) -> None:
+        tok = ArmTokenizer()
+        a = DecoderTransformer(tok.vocab_size, seed=7)
+        b = DecoderTransformer(tok.vocab_size, seed=7)
+        ids = tok.encode("<BOS><USER> hi <ARM>")
+        ga = a.generate(ids, max_new=8)
+        gb = b.generate(ids, max_new=8)
+        self.assertEqual(ga, gb)
+        self.assertEqual(len(ga), 8)
+
+    def test_arm_emits_proposal_through_abi(self) -> None:
+        world = World()
+        world.arm.mode = "teacher"
+        for _ in range(3):
+            world.step()
+        turn = world.handle_human("What do you perceive?")
+        self.assertIsNotNone(turn)
+        assert turn is not None
+        self.assertEqual(turn.proposal.action_type, "SPEAK")
+        self.assertTrue(turn.decision.accepted)
+        self.assertEqual(world.arm.last.source, "teacher")
+        self.assertGreater(len(world.arm.last.tokens), 0)
+        self.assertIsNotNone(world.last_language_context)
+        self.assertNotIn("act.device", world.last_language_context.capabilities)
+
+    def test_arm_teacher_probe_still_commits(self) -> None:
+        world = World()
+        world.step()
+        e0 = world.scheduler.field.sum(Channel.Energy)
+        turn = world.handle_human("Probe the energy peak")
+        assert turn is not None
+        self.assertEqual(turn.proposal.action_type, "PROBE")
+        self.assertGreater(world.scheduler.field.sum(Channel.Energy), e0)
 
 
 def main() -> None:

@@ -17,6 +17,7 @@ These files are the same schemas the Python `agent/` package implements:
 | `src/hash.ts` | `agent/hashutil.py` |
 | `src/world.ts` | `agent/loop.py` |
 | `src/repos.ts` | sibling repo map |
+| `src/language-protocol.ts` | `agent/language/protocol.py` |
 
 
 The live React HUD (chat + lattice + SELF panel) was proven in Grok Build
