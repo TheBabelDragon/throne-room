@@ -3,7 +3,7 @@
 Import this module only when torch is installed. The numpy runtime stays
 the default so the loop does not require torch.
 
-    pip install 'throne-room[head-torch]'
+    pip install torch
     python -m agent.language.torch_train
 
 Action head pools pre-attention token+pos embeddings over the user span

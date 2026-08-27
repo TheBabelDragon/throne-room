@@ -28,7 +28,7 @@ def _require_torch():
         import torch
         return torch
     except ImportError:
-        print("[torch] not installed. pip install 'throne-room[head-torch]'", flush=True)
+        print("[torch] not installed. From the venv: pip install torch", flush=True)
         raise SystemExit(2)
 
 

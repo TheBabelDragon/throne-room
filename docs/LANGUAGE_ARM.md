@@ -68,7 +68,7 @@ Two local runtimes. Same protocol. Same compose() voice.
 | Runtime | Command | Trains |
 |---------|---------|--------|
 | numpy (default) | `python -m agent.language.train` | action head on hashed n-grams. Decoder blocks stay genesis. No torch required. |
-| torch | `pip install 'throne-room[head-torch]'` then `python -m agent.language.torch_train` | **transformer blocks**, user-span pooled hidden → action, LM on composed `<PROPOSE><ACTION>body<EOS>` |
+| torch | `pip install torch` then `python -m agent.language.torch_train` | **transformer blocks**, user-span pooled embeddings → action, LM on composed `<PROPOSE><ACTION>body<EOS>` |
 
 Hold-out action accuracy ≥ 0.5 is the gate. Best checkpoint is kept.
 
@@ -80,7 +80,18 @@ observation → LanguageContext → tokens/proposal → ABI → FieldTick → wo
 
 ## Run
 
+Torch is optional. Numpy stays the default. Install from the venv — do not
+pip-install the extras name from PyPI, and quote any `[...]` or the shell
+will eat it.
+
 ```bash
+pip install torch
+# CPU-only fallback if the default wheel fails:
+#   pip install typing-extensions jinja2 filelock sympy networkx
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+# from the repo root, same extra:
+#   pip install -e ".[head-torch]"
+
 python -m agent.language.harness
 python -m agent.language.train --examples 64 --steps 40
 python -m agent.language.torch_train --examples 64 --steps 16
@@ -88,7 +99,6 @@ python -m agent.chat --arm teacher --once "What do you perceive?"
 python -m agent.chat --arm model --once "Probe the energy peak"
 python -m agent.chat --arm model --backend torch --learn
 ```
-
 `--backend auto` (default) prefers `/tmp/metafield/arm_gpt_v0.pt` when torch is installed.
 
 REPL: `:snap` `:drain` `:status` `:arm` `:q`

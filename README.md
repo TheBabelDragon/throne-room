@@ -37,6 +37,7 @@ python -m agent.chat --live --follow
 Local language arm (no API):
 
 ```bash
+pip install torch    # optional decoder; numpy stays the default
 python -m agent.language.harness
 python -m agent.language.train --examples 64 --steps 40
 python -m agent.language.torch_train --examples 64 --steps 16
@@ -44,7 +45,6 @@ python -m agent.chat --arm teacher --once "What do you perceive?"
 python -m agent.chat --arm model --once "Probe the energy peak"
 python -m agent.chat --arm model --backend torch --learn
 ```
-
 See [docs/LANGUAGE_ARM.md](docs/LANGUAGE_ARM.md). Tokenizer and protocol are owned here. Numpy trains a fastText action head (no torch required). `python -m agent.language.torch_train` backprops through decoder blocks. `compose()` is the operator voice — genesis tokens do not invent field numbers. `--learn` does one imitation step per turn from the teacher label.
 
 Portable TypeScript twins of the same kernel: [`web/`](web/README.md).
