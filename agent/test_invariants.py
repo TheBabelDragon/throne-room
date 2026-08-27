@@ -522,6 +522,55 @@ class ArmTests(unittest.TestCase):
         self.assertFalse(np.allclose(w0, model.w_act))
 
 
+def _has_torch() -> bool:
+    try:
+        import torch  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+@unittest.skipUnless(_has_torch(), "torch not installed")
+class TorchArmTests(unittest.TestCase):
+    def test_forward_shapes_and_determinism(self) -> None:
+        from agent.language.torch_model import ArmGPT
+        tok = ArmTokenizer()
+        a = ArmGPT(tok.vocab_size)
+        ids = tok.encode("<BOS><USER> Probe the energy peak <ARM>")
+        import torch
+        t = torch.tensor([ids], dtype=torch.long)
+        logits, hidden = a.forward(t)
+        self.assertEqual(tuple(logits.shape), (1, len(ids), tok.vocab_size))
+        self.assertEqual(tuple(hidden.shape), (1, len(ids), a.d_model))
+        pred, p = a.predict_action_p(ids)
+        self.assertIn(pred, ("SPEAK", "PROBE", "REMEMBER", "ATTEND", "SET_GOAL", "QUERY_FIELD", "WAIT"))
+        self.assertGreater(p, 0.0)
+        self.assertLessEqual(p, 1.0)
+
+    def test_torch_train_improves_action_head(self) -> None:
+        from agent.language.torch_train import run
+        with tempfile.TemporaryDirectory() as td:
+            ckpt = Path(td) / "arm_gpt.pt"
+            summary = run(examples=48, steps=8, lr=3e-3, ckpt=ckpt, seed=7, batch=8)
+            self.assertTrue(ckpt.exists())
+            self.assertGreaterEqual(summary["hold_acc"], 0.5)
+            self.assertGreaterEqual(summary["reload_acc"], 0.5)
+            self.assertEqual(summary["model"], "arm-gpt-v0")
+
+    def test_arm_loads_torch_checkpoint(self) -> None:
+        from agent.language.arm import LanguageArm
+        from agent.language.torch_model import ArmGPT
+        tok = ArmTokenizer()
+        gpt = ArmGPT(tok.vocab_size)
+        world = World()
+        world.arm = LanguageArm(mode="model", tokenizer=tok, model=gpt, min_p=0.0)
+        self.assertEqual(world.arm.backend, "torch")
+        world.step()
+        turn = world.handle_human("What do you perceive?")
+        self.assertIsNotNone(turn)
+        self.assertEqual(world.arm.last.source, "model")  # type: ignore[union-attr]
+
+
 def main() -> None:
     suite = unittest.defaultTestLoader.loadTestsFromModule(sys.modules[__name__])
     result = unittest.TextTestRunner(verbosity=2).run(suite)

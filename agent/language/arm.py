@@ -20,6 +20,8 @@ from agent.schemas import ActionProposal
 
 ArmMode = Literal["teacher", "model"]
 MIN_P = 0.22
+DEFAULT_CKPT = Path("/tmp/metafield/arm_dec_v0.npz")
+DEFAULT_TORCH_CKPT = Path("/tmp/metafield/arm_gpt_v0.pt")
 
 
 def _teacher(ctx: LanguageContext) -> ActionProposal:
@@ -40,9 +42,6 @@ def _teacher(ctx: LanguageContext) -> ActionProposal:
         memories=[m.text for m in ctx.memories],
     )
     return mock_reason(rc)
-
-
-DEFAULT_CKPT = Path("/tmp/metafield/arm_dec_v0.npz")
 
 
 def _tag_for(action: str) -> str:
@@ -153,9 +152,28 @@ def _find_checkpoint(explicit: Path | None = None) -> Path | None:
         Path(__file__).parent / "checkpoints" / "arm_dec_v0.npz",
     ]
     for p in candidates:
+        if p is not None and p.exists() and str(p).endswith(".npz"):
+            return p
+    return None
+
+
+def _find_torch_checkpoint(explicit: Path | None = None) -> Path | None:
+    import os
+    candidates = [
+        explicit if explicit is not None and str(explicit).endswith(".pt") else None,
+        Path(os.environ["ARM_TORCH_CHECKPOINT"]) if os.environ.get("ARM_TORCH_CHECKPOINT") else None,
+        DEFAULT_TORCH_CKPT,
+        Path(__file__).parent / "checkpoints" / "arm_gpt_v0.pt",
+    ]
+    for p in candidates:
         if p is not None and p.exists():
             return p
     return None
+
+
+def _load_torch(path: Path):
+    from agent.language.torch_model import ArmGPT
+    return ArmGPT.load(path)
 
 
 class LanguageArm:
@@ -164,32 +182,55 @@ class LanguageArm:
         *,
         mode: ArmMode = "teacher",
         tokenizer: ArmTokenizer | None = None,
-        model: DecoderTransformer | None = None,
+        model: object | None = None,
         max_new: int = 0,
         trajectory_path: Path | None = None,
         checkpoint: Path | None = None,
         learn: bool = False,
         min_p: float = MIN_P,
         learn_lr: float = 1.0,
+        backend: str = "auto",
     ) -> None:
         self.mode: ArmMode = mode
         if tokenizer is None:
             bundled = Path(__file__).parent / "tokenizer.json"
             tokenizer = ArmTokenizer.load(bundled) if bundled.exists() else ArmTokenizer()
         self.tokenizer = tokenizer
-        ckpt = _find_checkpoint(checkpoint)
+        self.backend = "numpy"
+        self.checkpoint = None
         if model is not None:
             self.model = model
-        elif ckpt is not None:
-            self.model = DecoderTransformer.load(ckpt)
-            self.checkpoint = ckpt
+            self.backend = "torch" if model.__class__.__name__ == "ArmGPT" else "numpy"
         else:
-            self.model = DecoderTransformer(self.tokenizer.vocab_size)
-            self.checkpoint = None
-        if ckpt is not None and model is None:
-            self.checkpoint = ckpt
-        elif model is not None:
-            self.checkpoint = None
+            torch_ckpt = _find_torch_checkpoint(checkpoint if backend in {"auto", "torch"} else None)
+            want_torch = backend in {"auto", "torch"}
+            loaded = None
+            if want_torch and torch_ckpt is not None:
+                try:
+                    loaded = _load_torch(torch_ckpt)
+                except ImportError:
+                    loaded = None
+            if loaded is not None:
+                self.model = loaded
+                self.backend = "torch"
+                self.checkpoint = torch_ckpt
+            else:
+                if backend == "torch":
+                    try:
+                        from agent.language.torch_model import ArmGPT
+                        self.model = ArmGPT(self.tokenizer.vocab_size)
+                        self.backend = "torch"
+                    except ImportError:
+                        self.model = DecoderTransformer(self.tokenizer.vocab_size)
+                        self.backend = "numpy"
+                else:
+                    ckpt = _find_checkpoint(checkpoint)
+                    if ckpt is not None:
+                        self.model = DecoderTransformer.load(ckpt)
+                        self.checkpoint = ckpt
+                    else:
+                        self.model = DecoderTransformer(self.tokenizer.vocab_size)
+                    self.backend = "numpy"
         self.max_new = max_new
         self.trajectory_path = trajectory_path
         self.learn = learn
@@ -228,13 +269,17 @@ class LanguageArm:
         if self.learn:
             gold = teacher.action_type
             if gold in ACTION_ORDER:
-                from agent.language.train import learn_one
-                learn_one(
-                    self.model,
-                    prompt,
-                    ACTION_ORDER.index(gold),
-                    lr=self.learn_lr,
-                )
+                if self.backend == "torch":
+                    from agent.language.torch_train import learn_one as tlearn
+                    tlearn(self.model, prompt, ACTION_ORDER.index(gold), lr=min(self.learn_lr, 1e-3))
+                else:
+                    from agent.language.train import learn_one
+                    learn_one(
+                        self.model,
+                        prompt,
+                        ACTION_ORDER.index(gold),
+                        lr=self.learn_lr,
+                    )
                 self.learn_steps += 1
         out = LanguageOutput(
             tokens=tokens,
@@ -242,7 +287,7 @@ class LanguageArm:
             proposal=proposal,
             source=source,
             tokenizer_version=self.tokenizer.version,
-            model_version=MODEL_VERSION,
+            model_version=str(getattr(self.model, "version", MODEL_VERSION)),
             prompt_tokens=prompt,
             confidence=confidence,
             predicted_action=predicted,

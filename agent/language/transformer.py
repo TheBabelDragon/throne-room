@@ -2,7 +2,8 @@
 
 v1 trains an action head on user-span hashed char-ngrams (fastText) plus
 a weakly-scaled embedding bag, and a prefix LM head. Decoder blocks stay
-genesis until a torch path exists — that is honest, not a stub.
+genesis here. The torch path (`python -m agent.language.torch_train`)
+is what actually backprops through attention.
 """
 
 from __future__ import annotations

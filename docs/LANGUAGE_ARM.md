@@ -61,23 +61,18 @@ Owned here: `agent/language/tokenizer.json`
 - `user_span()` is the current utterance (`<USER>`…`<ARM>`). Field/SELF
   prefixes are context, not the action-head features.
 
-## What actually trains (v1)
+## What actually trains
 
-Numpy only. No torch required. Decoder blocks stay genesis until a later
-torch path (`pip install throne-room[head-torch]`) exists — that is
-honest, not a stub.
+Two local runtimes. Same protocol. Same compose() voice.
 
-| Piece | Input | Target |
-|-------|-------|--------|
-| Action head `w_act`, `b_act` | user-span embed-bag ⊕ hashed byte n-grams | SPEAK/PROBE/REMEMBER/ATTEND/SET_GOAL/QUERY_FIELD/WAIT |
-| Token embeddings | those user-span ids | same labels (fastText-style) |
-| LM head prefix | prompt hidden | teacher-forced `<PROPOSE><ACTION>` |
+| Runtime | Command | Trains |
+|---------|---------|--------|
+| numpy (default) | `python -m agent.language.train` | action head on hashed n-grams. Decoder blocks stay genesis. No torch required. |
+| torch | `pip install 'throne-room[head-torch]'` then `python -m agent.language.torch_train` | **transformer blocks**, user-span pooled hidden → action, LM on composed `<PROPOSE><ACTION>body<EOS>` |
 
 Hold-out action accuracy ≥ 0.5 is the gate. Best checkpoint is kept.
 
-Corpus: MetaField engine rollouts labeled by the teacher policy, mixed
-with `/tmp/metafield/arm_trajectories.jsonl` when `--trajectories` is
-passed. Trajectory tokens are the **composed** utterance, not decoder junk.
+`compose()` remains the operator utterance. Field numbers are observed, not sampled. Torch generation is for the protocol sequence and trajectories.
 
 ```
 observation → LanguageContext → tokens/proposal → ABI → FieldTick → world_response
@@ -88,14 +83,21 @@ observation → LanguageContext → tokens/proposal → ABI → FieldTick → wo
 ```bash
 python -m agent.language.harness
 python -m agent.language.train --examples 64 --steps 40
+python -m agent.language.torch_train --examples 64 --steps 16
 python -m agent.chat --arm teacher --once "What do you perceive?"
 python -m agent.chat --arm model --once "Probe the energy peak"
-python -m agent.chat --arm model --learn
+python -m agent.chat --arm model --backend torch --learn
 ```
+
+`--backend auto` (default) prefers `/tmp/metafield/arm_gpt_v0.pt` when torch is installed.
 
 REPL: `:snap` `:drain` `:status` `:arm` `:q`
 
-Checkpoint: `/tmp/metafield/arm_dec_v0.npz` (or `ARM_CHECKPOINT=`).
+Checkpoints:
+
+- numpy: `/tmp/metafield/arm_dec_v0.npz` (`ARM_CHECKPOINT=`)
+- torch: `/tmp/metafield/arm_gpt_v0.pt` (`ARM_TORCH_CHECKPOINT=`)
+
 Trajectories: `ARM_TRAJECTORIES=` (default `/tmp/metafield/arm_trajectories.jsonl`).
 
 ## Milestone
@@ -113,3 +115,4 @@ Trajectories: `ARM_TRAJECTORIES=` (default `/tmp/metafield/arm_trajectories.json
 11. Fit an action head on engine trajectories until hold-out ≥ 0.5
 12. Abstain (WAIT) when the head is below threshold
 13. Online imitation (`--learn`) from the teacher label
+14. Torch decoder that actually trains attention (optional extra)

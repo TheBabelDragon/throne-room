@@ -301,6 +301,7 @@ class World:
             "csi_synthetic": None if self.last_obs is None else self.last_obs.synthetic,
             "csi_rssi": None if self.last_obs is None else self.last_obs.rssi_dbm,
             "arm_mode": self.arm.mode,
+            "arm_backend": getattr(self.arm, "backend", "numpy"),
             "arm_source": None if self.arm.last is None else self.arm.last.source,
             "arm_tokens": 0 if self.arm.last is None else len(self.arm.last.tokens),
             "arm_confidence": None if self.arm.last is None else self.arm.last.confidence,

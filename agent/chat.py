@@ -135,6 +135,7 @@ def _repl(world: World, interval: float) -> None:
                 json.dumps(
                     {
                         "mode": world.arm.mode,
+                        "backend": getattr(world.arm, "backend", "numpy"),
                         "checkpoint": str(getattr(world.arm, "checkpoint", None)),
                         "learn": world.arm.learn,
                         "learn_steps": world.arm.learn_steps,
@@ -175,6 +176,7 @@ def main() -> None:
     parser.add_argument("--live", action="store_true", help="Follow /tmp/metafield CSI + Aurora journals")
     parser.add_argument("--follow", action="store_true", help="Tick from feeds (no REPL). Ctrl+C to stop")
     parser.add_argument("--arm", choices=("teacher", "model"), default="teacher", help="Local language arm. teacher=structured policy, model=trained action head + composed voice")
+    parser.add_argument("--backend", choices=("auto", "numpy", "torch"), default="auto", help="auto prefers a torch .pt checkpoint when present")
     parser.add_argument("--learn", action="store_true", help="Online imitation: one action-head step per turn using the teacher label")
     parser.add_argument("--interval", type=float, default=0.25)
     args = parser.parse_args()
@@ -183,6 +185,9 @@ def main() -> None:
     if args.live and memory is None:
         memory = DEFAULT_MEMORY
     world = World(memory_path=memory)
+    if args.backend != "auto":
+        from agent.language.arm import LanguageArm
+        world.arm = LanguageArm(mode=args.arm, backend=args.backend, learn=bool(args.learn))  # type: ignore[arg-type]
     world.arm.mode = args.arm  # type: ignore[assignment]
     world.arm.learn = bool(args.learn)
     if args.live:
@@ -193,7 +198,7 @@ def main() -> None:
     print(
         f"[agent] SELF online  t{format_tick(snap['sequence'])}  "
         f"integrity={snap['integrity']}  live={snap['live']}  "
-        f"arm={snap['arm_mode']} tok={snap['tokenizer']}  "
+        f"arm={snap['arm_mode']}/{snap.get('arm_backend', 'numpy')} tok={snap['tokenizer']}  "
         f"caps={','.join(snap['capabilities'])}",
         flush=True,
     )
