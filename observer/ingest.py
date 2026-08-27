@@ -140,12 +140,21 @@ def stdin_lines() -> Iterator[str]:
 def udp_lines(host: str = "0.0.0.0", port: int = 4210) -> Iterator[str]:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind((host, port))
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 20)
+    except OSError:
+        pass
+    try:
+        sock.bind((host, port))
+    except OSError as e:
+        print(f"[udp] bind {host}:{port} failed: {e}", file=sys.stderr, flush=True)
+        raise
     sock.settimeout(0.2)
+    print(f"[udp] bound {host}:{port}", flush=True)
     try:
         while True:
             try:
-                data, _addr = sock.recvfrom(65535)
+                data, addr = sock.recvfrom(65535)
                 text = data.decode("utf-8", errors="replace")
                 for line in text.splitlines():
                     if line.strip():

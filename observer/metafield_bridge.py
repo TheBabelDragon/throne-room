@@ -144,6 +144,10 @@ def main() -> None:
         help="Listen UDP (default 4210)",
     )
     parser.add_argument(
+        "--bind", default="0.0.0.0",
+        help="UDP bind address (default 0.0.0.0, required for ESP32/CYD)",
+    )
+    parser.add_argument(
         "--file", "-f", type=Path, action="append", default=[],
         help="Input JSONL (wifi_csi or flat FO)",
     )
@@ -164,12 +168,12 @@ def main() -> None:
         args.udp = 4210
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    out = args.out.open("a", encoding="utf-8")
+    out = args.out.open("a", encoding="utf-8", buffering=1)
     count = 0
 
     def raw_lines():
         if args.udp is not None:
-            yield from udp_lines(port=args.udp)
+            yield from udp_lines(host=args.bind, port=args.udp)
         for p in args.file:
             yield from tail_file(p, from_start=args.from_start)
         if args.stdin or (not args.file and args.udp is None):
@@ -178,7 +182,7 @@ def main() -> None:
 
     print(f"[metafield-bridge] writing → {args.out}", flush=True)
     if args.udp is not None:
-        print(f"[metafield-bridge] UDP :{args.udp}", flush=True)
+        print(f"[metafield-bridge] UDP {args.bind}:{args.udp}", flush=True)
 
     try:
         for line in raw_lines():
@@ -205,7 +209,7 @@ def main() -> None:
             out.write(json.dumps(packet, separators=(",", ":")) + "\n")
             out.flush()
             count += 1
-            if count % 25 == 0:
+            if count == 1 or count % 25 == 0:
                 print(
                     f"[metafield-bridge] {count} packets  "
                     f"last={packet.get('body_id')}  "

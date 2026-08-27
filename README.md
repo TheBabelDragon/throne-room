@@ -105,6 +105,8 @@ python -m agent.chat --live --follow
 python -m agent.chat --live
 ```
 
+REPL commands: `:snap` `:drain` `:status` `:q`. The prompt no longer blocks CSI ingest — backlog is drained while you sit at `operator>`. Bridge logs: `/tmp/metafield/bridge.log`. Conductor prints `csi_stale` if `/tmp/metafield/csi.jsonl` stops growing.
+
 `--ticks` is a **count** (offline synthetic warmup). The journal path is `--journal` (default `/tmp/metafield/agent_ticks.jsonl`). Do not pass a file to `--ticks`.
 
 ### 3. Torch only

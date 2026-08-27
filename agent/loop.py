@@ -70,28 +70,29 @@ class World:
         self.ticks_path = ticks
         counts = {"csi": 0, "aurora": 0}
         if csi is not None:
-            self.csi_cursor = JsonlCursor(csi)
+            self.csi_cursor = JsonlCursor(csi, keep=max(1, warmup))
             for pkt in self.csi_cursor.catch_up_keep(warmup):
                 if self.ingest_packet(pkt):
                     counts["csi"] += 1
         if aurora is not None:
-            self.aurora_cursor = JsonlCursor(aurora)
+            self.aurora_cursor = JsonlCursor(aurora, keep=max(1, warmup))
             for pkt in self.aurora_cursor.catch_up_keep(warmup):
                 if self.observe_aurora(pkt):
                     counts["aurora"] += 1
         return counts
 
-    def drain_feeds(self) -> dict[str, int]:
-        counts = {"csi": 0, "aurora": 0}
+    def drain_feeds(self, max_records: int = 64) -> dict[str, int]:
+        counts = {"csi": 0, "aurora": 0, "backlog": 0}
         if self.csi_cursor is not None:
-            for pkt in self.csi_cursor.poll():
+            for pkt in self.csi_cursor.poll(max_records=max_records):
                 try:
                     if self.ingest_packet(pkt):
                         counts["csi"] += 1
                 except Exception:
                     continue
+            counts["backlog"] = self.csi_cursor.backlog_bytes()
         if self.aurora_cursor is not None:
-            for pkt in self.aurora_cursor.poll():
+            for pkt in self.aurora_cursor.poll(max_records=max_records):
                 try:
                     if self.observe_aurora(pkt):
                         counts["aurora"] += 1
@@ -158,7 +159,7 @@ class World:
         trimmed = text.strip()
         if not trimmed:
             return None
-        self.drain_feeds()
+        self.drain_feeds(max_records=24)
         tick = self.scheduler.sequence
         perception = chat_perception(trimmed, tick)
         self.last_perception = perception

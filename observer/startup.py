@@ -54,6 +54,7 @@ class Child:
     env: dict[str, str] = field(default_factory=dict)
     required: bool = True
     inherit_stdio: bool = False
+    log_path: Path | None = None
 
     def alive(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
@@ -63,7 +64,14 @@ class Child:
             return
         env = os.environ.copy()
         env.update(self.env)
-        std = None if self.inherit_stdio else subprocess.DEVNULL
+        std: Any
+        if self.inherit_stdio:
+            std = None
+        elif self.log_path is not None:
+            self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            std = self.log_path.open("a", encoding="utf-8")
+        else:
+            std = subprocess.DEVNULL
         self.proc = subprocess.Popen(
             self.cmd,
             cwd=str(self.cwd or ROOT),
@@ -71,7 +79,8 @@ class Child:
             stdout=std,
             stderr=std,
         )
-        print(f"[control] start {self.name}  pid={self.proc.pid}", flush=True)
+        extra = f"  log={self.log_path}" if self.log_path else ""
+        print(f"[control] start {self.name}  pid={self.proc.pid}{extra}", flush=True)
 
     def restart_if_dead(self) -> None:
         if self.alive():
@@ -281,6 +290,7 @@ def main() -> None:
         description="Throne Room intelligent startup — multi-process conductor"
     )
     parser.add_argument("--udp", type=int, default=4210)
+    parser.add_argument("--udp-bind", default="0.0.0.0", help="Bridge UDP bind address")
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     parser.add_argument("--memory", type=Path, default=DEFAULT_MEMORY)
     parser.add_argument("--digest", type=Path, default=DEFAULT_DIGEST)
@@ -362,9 +372,12 @@ def main() -> None:
             name="metafield_bridge",
             cmd=[
                 sys.executable, "-m", "observer.metafield_bridge",
-                "--udp", str(args.udp), "--out", str(args.out),
+                "--udp", str(args.udp),
+                "--bind", args.udp_bind,
+                "--out", str(args.out),
             ],
             cwd=ROOT, env=env, required=True,
+            log_path=Path("/tmp/metafield/bridge.log"),
         )
     )
 
@@ -525,9 +538,17 @@ def main() -> None:
                 else:
                     fo_mem = f"fo_mem={obs.get('memory_status', 'off')}"
 
+                try:
+                    age = now - args.out.stat().st_mtime
+                    csi_age = f"age={age:.1f}s"
+                    if age > 8:
+                        csi_age += " STALE"
+                except OSError:
+                    csi_age = "MISSING"
+
                 print(
                     f"[control] digest health={digest['health']}  "
-                    f"csi={obs['csi_lines']}  "
+                    f"csi={obs['csi_lines']} {csi_age}  "
                     f"{fo_mem}  "
                     f"pressure={field_snap.get('pressure', 0):.3f}  "
                     f"host={host_snap['advice']}  "

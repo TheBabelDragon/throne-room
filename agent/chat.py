@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import select
 import sys
 import time
 from pathlib import Path
@@ -56,6 +57,76 @@ def _attach(world: World, args: argparse.Namespace) -> None:
     )
 
 
+def _run_turn(world: World, line: str) -> None:
+    print("[agent] …", flush=True)
+    try:
+        turn = world.handle_human(line)
+    except Exception as exc:
+        print(f"[agent] turn error: {type(exc).__name__}: {exc}", flush=True)
+        return
+    if turn:
+        _print_turn(world, turn.proposal.action_type)
+
+
+def _repl(world: World, interval: float) -> None:
+    print("[agent] type a line. :snap  :drain  :status  :q", flush=True)
+    prompt = "operator> "
+    use_select = sys.stdin.isatty()
+    print(prompt, end="", flush=True)
+    while True:
+        if use_select:
+            try:
+                ready, _, _ = select.select([sys.stdin], [], [], max(0.05, interval))
+            except (ValueError, OSError):
+                use_select = False
+                ready = [sys.stdin]
+            if not ready:
+                world.drain_feeds(max_records=16)
+                continue
+            line = sys.stdin.readline()
+            if line == "":
+                print()
+                return
+        else:
+            try:
+                line = input(prompt)
+            except EOFError:
+                print()
+                return
+        text = line.strip()
+        if not text:
+            if use_select:
+                print(prompt, end="", flush=True)
+            continue
+        if text in {":q", ":quit", "exit"}:
+            return
+        if text == ":snap":
+            print(json.dumps(world.snapshot(), indent=2, default=str), flush=True)
+        elif text == ":step":
+            world.drain_feeds(max_records=16)
+            world.step()
+            _print_turn(world, "TICK")
+        elif text == ":drain":
+            got = world.drain_feeds(max_records=64)
+            print(f"[drain] {got}", flush=True)
+        elif text == ":status":
+            snap = world.snapshot()
+            backlog = 0
+            if world.csi_cursor is not None:
+                backlog = world.csi_cursor.backlog_bytes()
+            print(
+                f"[status] t{format_tick(snap['sequence'])} live={snap['live']} "
+                f"packets={snap['packets_ingested']} aurora={snap['aurora_seen']} "
+                f"body={snap['csi_body'] or '-'} rssi={snap.get('csi_rssi')} "
+                f"backlog={backlog}B hash={snap['tick_hash']}",
+                flush=True,
+            )
+        else:
+            _run_turn(world, text)
+        if use_select:
+            print(prompt, end="", flush=True)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Throne Room agent loop — chat as actuator")
     parser.add_argument("--once", metavar="TEXT", help="Single utterance then exit")
@@ -91,7 +162,7 @@ def main() -> None:
         try:
             while True:
                 try:
-                    got = world.drain_feeds()
+                    got = world.drain_feeds(max_records=32)
                 except Exception as exc:
                     print(f"[follow] drain error: {type(exc).__name__}: {exc}", flush=True)
                     time.sleep(max(0.05, args.interval))
@@ -130,45 +201,17 @@ def main() -> None:
         return
 
     if args.once:
-        turn = world.handle_human(args.once)
-        if turn:
-            _print_turn(world, turn.proposal.action_type)
+        _run_turn(world, args.once)
         return
 
     if not sys.stdin.isatty():
         for line in sys.stdin:
             if line.strip():
-                turn = world.handle_human(line)
-                if turn:
-                    _print_turn(world, turn.proposal.action_type)
+                _run_turn(world, line)
         return
 
     try:
-        while True:
-            try:
-                line = input("operator> ")
-            except EOFError:
-                print()
-                break
-            if not line.strip():
-                continue
-            if line.strip() in {":q", ":quit", "exit"}:
-                break
-            if line.strip() == ":snap":
-                print(json.dumps(world.snapshot(), indent=2, default=str))
-                continue
-            if line.strip() == ":step":
-                world.drain_feeds()
-                world.step()
-                _print_turn(world, "TICK")
-                continue
-            if line.strip() == ":drain":
-                got = world.drain_feeds()
-                print(f"[drain] {got}", flush=True)
-                continue
-            turn = world.handle_human(line)
-            if turn:
-                _print_turn(world, turn.proposal.action_type)
+        _repl(world, args.interval)
     except KeyboardInterrupt:
         print("\n[agent] stopped", flush=True)
 
