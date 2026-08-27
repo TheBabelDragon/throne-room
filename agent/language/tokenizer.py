@@ -11,8 +11,9 @@ from pathlib import Path
 from typing import Iterable
 
 from agent.language.protocol import LanguageContext
+from agent.schemas import ActionProposal
 
-TOKENIZER_VERSION = "arm-tok-v0"
+TOKENIZER_VERSION = "arm-tok-v1"
 BYTE_SIZE = 256
 
 SPECIALS: tuple[str, ...] = (
@@ -35,7 +36,19 @@ SPECIALS: tuple[str, ...] = (
     "<MEM>",
     "<GOAL>",
     "<CAP>",
+    "<PROBE>",
+    "<SET_GOAL>",
 )
+
+ACTION_TAGS: dict[str, str] = {
+    "SPEAK": "<SPEAK>",
+    "PROBE": "<PROBE>",
+    "REMEMBER": "<REMEMBER>",
+    "ATTEND": "<ATTEND>",
+    "SET_GOAL": "<SET_GOAL>",
+    "QUERY_FIELD": "<QUERY>",
+    "WAIT": "<WAIT>",
+}
 
 
 class ArmTokenizer:
@@ -116,6 +129,58 @@ class ArmTokenizer:
         if ids[:1] != [bos]:
             ids = [bos] + ids
         return ids[-max_len:]
+
+    def user_span(self, ids: list[int]) -> list[int]:
+        """Tokens of the current utterance: last <USER> … <ARM>.
+
+        Action labels live here. Field/SELF prefixes are the same across
+        turns and must not dominate the action-head features.
+        """
+        uid = self._stoi.get("<USER>")
+        aid = self._stoi.get("<ARM>")
+        last_user = None
+        last_arm = None
+        for i, tok in enumerate(ids):
+            if tok == uid:
+                last_user = i
+            elif tok == aid:
+                last_arm = i
+        if last_user is None:
+            return ids[-32:] if ids else [0]
+        end = last_arm if (last_arm is not None and last_arm > last_user) else len(ids)
+        span = ids[last_user:end]
+        return span if span else ids[-32:]
+
+    def encode_target(self, proposal: ActionProposal, *, max_body: int = 120) -> list[int]:
+        """Teacher-forced arm utterance: <PROPOSE><ACTION>body<EOS>."""
+        act = proposal.action_type
+        tag = ACTION_TAGS.get(act, "<SPEAK>")
+        if tag not in self._stoi:
+            tag = "<SPEAK>"
+        params = proposal.parameters or {}
+        if act == "SPEAK":
+            body = str(params.get("text") or "")[:max_body]
+        elif act == "PROBE":
+            body = f"{params.get('x', 0)},{params.get('z', 0)},{params.get('magnitude', 0.5)}"
+        elif act == "REMEMBER":
+            body = str(params.get("note") or "")[:max_body]
+        elif act == "ATTEND":
+            body = str(params.get("target") or "field")
+        elif act == "SET_GOAL":
+            body = str(params.get("text") or "")[:max_body]
+        elif act == "QUERY_FIELD":
+            body = str(params.get("text") or "field")[:max_body]
+        else:
+            body = str(params.get("text") or "")[:max_body]
+        return self.encode(f"<PROPOSE>{tag}{body}<EOS>")
+
+    def action_from_ids(self, ids: list[int]) -> str | None:
+        tags = {v: k for k, v in ACTION_TAGS.items() if v in self._stoi}
+        special_ids = {self._stoi[k]: v for k, v in tags.items()}
+        for i in ids:
+            if int(i) in special_ids:
+                return special_ids[int(i)]
+        return None
 
     def as_dict(self) -> dict:
         return {

@@ -1,6 +1,6 @@
 [project]
 name = "throne-room"
-version = "0.8.0"
+version = "0.9.0"
 description = "Operational Field Observer + agent-in-a-world loop for the MetaField stack"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -21,6 +21,7 @@ throne-torch = "visualization.torch_display:main"
 throne-aurora = "aurora.action_layer:main"
 throne-agent = "agent.chat:main"
 throne-arm = "agent.language.harness:main"
+throne-arm-train = "agent.language.train:main"
 
 [build-system]
 requires = ["setuptools>=61"]

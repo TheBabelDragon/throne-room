@@ -9,4 +9,5 @@ build/
 .mypy_cache/
 .DS_Store
 *.pt
+*.npz
 .env

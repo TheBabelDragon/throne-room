@@ -123,6 +123,30 @@ export const REPOS: RepoNode[] = [
     href: "https://github.com/TheBabelDragon/metafield-work",
     blurb: "Operator isolation experiments. Not the runtime.",
   },
+  {
+    name: "arty-realtime",
+    role: "Realtime boundary",
+    layer: "transport",
+    live: false,
+    href: "https://github.com/TheBabelDragon/arty-realtime",
+    blurb: "Fast physical loop vs slow model loop. S/PDIF, Field Bus, FT601.",
+  },
+  {
+    name: "aurora-coordination",
+    role: "Privileged coordination",
+    layer: "compute",
+    live: false,
+    href: "https://github.com/TheBabelDragon/aurora-coordination",
+    blurb: "Private Overlord / ESCAPE. The only path onto real swarm actuators.",
+  },
+  {
+    name: "zvs-node",
+    role: "Power stage",
+    layer: "perception",
+    live: false,
+    href: "https://github.com/TheBabelDragon/zvs-node",
+    blurb: "Private ZVS / ultrasonic power body. Organ, not a brain.",
+  },
 ];
 
 export const LOOP_CONTRACT = [

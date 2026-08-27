@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Language Arm v0 evaluation harness.
+"""Language Arm evaluation harness.
 
 Builds synthetic FieldTick trajectories, runs the local arm, records the
-protocol, and checks replay. No network. No training.
+protocol, and checks replay. No network.
 
     python -m agent.language.harness
     python -m agent.language.harness --steps 16 --arm model
+    python -m agent.language.train          # separate: fit the action head
 """
 
 from __future__ import annotations

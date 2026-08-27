@@ -15,3 +15,5 @@ jobs:
         run: python -m agent.test_invariants
       - name: Language arm harness
         run: python -m agent.language.harness --steps 8
+      - name: Language arm train runtime
+        run: python -m agent.language.train --examples 48 --steps 40 --lr 1.5

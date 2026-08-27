@@ -1,4 +1,4 @@
-# Language Arm v0
+# Language Arm v0 → training runtime
 
 The language arm is a **local Aurora participant**. It is not an API
 client with a system prompt. The model does not define the architecture.
@@ -40,41 +40,58 @@ Also: `ConversationEvent`, `MemoryReference`, `ParticipantObservation`.
 Any runtime that satisfies the protocol can be the arm. Today:
 
 - `teacher` — local structured policy (same as the old mock reasoner)
-- `model` — tiny numpy decoder; valid structured decode wins, else teacher bootstrap
+- `model` — tiny numpy decoder; action head selects SPEAK/PROBE/…; valid structured decode wins, else grounded bootstrap
 
-Untrained genesis weights will not speak English. That is expected. The
-**environment + protocol + trajectory format + harness** are the v0
-milestone. Training is a later decision that must not change this shape.
+Untrained genesis weights will not speak English. That is expected. After
+`python -m agent.language.train` the **action head** is the part that
+deserves to run.
 
 ## Tokenizer
 
 Owned here: `agent/language/tokenizer.json`
 
 - bytes 0–255 identity
-- specials from 256: `<OBSERVE>` `<ATTEND>` `<QUERY>` `<REMEMBER>` `<PROPOSE>` `<SPEAK>` …
-- version `arm-tok-v0`
+- specials from 256: `<OBSERVE>` `<ATTEND>` `<QUERY>` `<REMEMBER>` `<PROPOSE>` `<SPEAK>` `<PROBE>` `<SET_GOAL>` …
+- version `arm-tok-v1`
+- `user_span()` is the current utterance (`<USER>`…`<ARM>`). Field/SELF
+  prefixes are context for generation, not the action-head features.
 
-## Trajectories
+## What actually trains (v1)
 
-Each turn can append `/tmp/metafield/arm_trajectories.jsonl`:
+Numpy only. No torch required. Decoder blocks stay genesis until a later
+torch path (`pip install throne-room[head-torch]`) exists — that is
+honest, not a stub.
+
+| Piece | Input | Target |
+|-------|-------|--------|
+| Action head `w_act`, `b_act` | user-span embed-bag ⊕ hashed byte-trigrams | SPEAK/PROBE/REMEMBER/ATTEND/SET_GOAL/QUERY_FIELD/WAIT |
+| Token embeddings | those user-span ids | same labels (fastText-style) |
+| LM head prefix | prompt hidden | teacher-forced `<PROPOSE><ACTION>` |
+
+Hold-out action accuracy ≥ 0.5 is the gate. Best checkpoint is kept.
+
+Corpus: MetaField engine rollouts labeled by the teacher policy, mixed
+with `/tmp/metafield/arm_trajectories.jsonl` when present. Do not scrape
+chat logs as the primary corpus.
 
 ```
-observation → context → tokens/proposal → ABI → FieldTick → world_response
+observation → LanguageContext → tokens/proposal → ABI → FieldTick → world_response
 ```
-
-The engine can generate these forever, deterministically. That is the
-training environment. Do not scrape chat logs as the primary corpus.
 
 ## Run
 
 ```bash
 python -m agent.language.harness
 python -m agent.language.harness --arm model --steps 8
-python -m agent.chat --once "What do you perceive?"
+python -m agent.language.train --examples 64 --steps 40
+python -m agent.chat --arm model --once "Probe the energy peak"
 python -m agent.chat --arm teacher --live
 ```
 
-## Milestone (v0)
+Checkpoint: `/tmp/metafield/arm_dec_v0.npz` (or `ARM_CHECKPOINT=`).
+Trajectories: `ARM_TRAJECTORIES=` (default `/tmp/metafield/arm_trajectories.jsonl`).
+
+## Milestone
 
 1. Join the loop as a participant (capabilities, no `act.device`)
 2. Receive only permitted observations
@@ -86,3 +103,4 @@ python -m agent.chat --arm teacher --live
 8. Observe resulting FieldTicks
 9. Provenance on every proposal
 10. Replay the field interaction deterministically
+11. Fit an action head on engine trajectories until hold-out ≥ 0.5

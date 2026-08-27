@@ -83,6 +83,24 @@ def mock_reason(ctx: ReasoningContext) -> ActionProposal:
             confidence=0.8,
             originating_observation=ctx.observation_id,
         )
+    if re.search(r"\b(wait|hold|pause)\b", text):
+        return make_proposal(
+            action_type="WAIT",
+            parameters={"text": "hold"},
+            target="field",
+            rationale="Operator asked to wait.",
+            confidence=0.8,
+            originating_observation=ctx.observation_id,
+        )
+    if re.search(r"\b(query(\s+the)?\s+field|inspect the lattice|sample the lattice)\b", text):
+        return make_proposal(
+            action_type="QUERY_FIELD",
+            parameters={"text": ctx.user_text},
+            target="field",
+            rationale="Operator asked to query the field without mutating it.",
+            confidence=0.82,
+            originating_observation=ctx.observation_id,
+        )
     if re.search(r"\b(attend|look at|focus|watch)\b", text):
         target = "csi" if "csi" in text else ("chat" if "chat" in text else "field")
         return make_proposal(

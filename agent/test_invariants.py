@@ -383,7 +383,7 @@ class ArmTests(unittest.TestCase):
         text = "<BOS>hello <SPEAK>field<EOS>"
         ids = tok.encode(text)
         self.assertEqual(tok.decode(ids), text)
-        self.assertEqual(tok.version, "arm-tok-v0")
+        self.assertEqual(tok.version, "arm-tok-v1")
 
     def test_transformer_is_local_and_deterministic(self) -> None:
         tok = ArmTokenizer()
@@ -418,6 +418,48 @@ class ArmTests(unittest.TestCase):
         assert turn is not None
         self.assertEqual(turn.proposal.action_type, "PROBE")
         self.assertGreater(world.scheduler.field.sum(Channel.Energy), e0)
+
+    def test_encode_target_is_structured(self) -> None:
+        tok = ArmTokenizer()
+        from agent.operator_abi import make_proposal
+        p = make_proposal(
+            action_type="PROBE",
+            parameters={"x": 7, "z": 7, "magnitude": 0.5},
+            target="7,7",
+            rationale="t",
+            confidence=0.9,
+            originating_observation="o",
+        )
+        ids = tok.encode_target(p)
+        self.assertEqual(tok.action_from_ids(ids), "PROBE")
+        self.assertEqual(ids[0], tok.special_id("<PROPOSE>"))
+
+    def test_user_span_ignores_field_prefix(self) -> None:
+        tok = ArmTokenizer()
+        a = tok.encode("<BOS><FIELD> t=1 E=9.90 <USER> Probe the energy peak <ARM>")
+        b = tok.encode("<BOS><FIELD> t=99 E=0.01 <USER> Probe the energy peak <ARM>")
+        self.assertEqual(tok.decode(tok.user_span(a)), tok.decode(tok.user_span(b)))
+        self.assertIn("Probe the energy peak", tok.decode(tok.user_span(a)))
+        self.assertNotIn("E=9.90", tok.decode(tok.user_span(a)))
+
+    def test_dataset_covers_all_actions(self) -> None:
+        from agent.language.dataset import SCRIPTS, synthesize
+        from agent.language.transformer import ACTION_ORDER
+        labeled = {expect for _, expect in SCRIPTS}
+        self.assertTrue(set(ACTION_ORDER).issubset(labeled))
+        data = synthesize(len(SCRIPTS), tokenizer=ArmTokenizer())
+        got = {ex.action for ex in data}
+        self.assertTrue(set(ACTION_ORDER).issubset(got), got)
+
+    def test_train_runtime_improves_action_head(self) -> None:
+        from agent.language.train import run
+        with tempfile.TemporaryDirectory() as td:
+            ckpt = Path(td) / "arm.npz"
+            summary = run(examples=48, steps=40, lr=1.5, ckpt=ckpt, seed=7)
+            self.assertTrue(ckpt.exists())
+            self.assertGreaterEqual(summary["hold_acc"], 0.5)
+            self.assertGreaterEqual(summary["reload_acc"], 0.5)
+            self.assertEqual(summary["model"], "arm-dec-v1")
 
 
 def main() -> None:
