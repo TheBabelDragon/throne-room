@@ -1,7 +1,7 @@
 [project]
 name = "throne-room"
-version = "0.6.0"
-description = "Operational Field Observer + closed-loop spatial HUD for the MetaField stack"
+version = "0.7.0"
+description = "Operational Field Observer + agent-in-a-world loop for the MetaField stack"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -19,10 +19,11 @@ throne = "observer.live_view:main"
 throne-up = "observer.startup:main"
 throne-torch = "visualization.torch_display:main"
 throne-aurora = "aurora.action_layer:main"
+throne-agent = "agent.chat:main"
 
 [build-system]
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["observer*", "visualization*", "aurora*"]
+include = ["observer*", "visualization*", "aurora*", "agent*"]

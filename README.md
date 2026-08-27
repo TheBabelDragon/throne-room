@@ -1,12 +1,44 @@
 # Throne Room
 
-**Operational live Field Observer + closed-loop spatial HUD for the MetaField stack.**
+**Operational live Field Observer + agent-in-a-world loop for the MetaField stack.**
 
-Real measurements only. CSI snake → JSONL → MetaField → Aurora → torch HUD.
+Two faces, one repo:
+
+1. **Live observer** — real measurements only. CSI snake → JSONL → MetaField → Aurora → torch HUD.
+2. **Agent loop** — chat as the first human actuator. PerceptionEvent → SelfState → ActionProposal → operator ABI → FieldDelta → FieldTick.
+
+They meet at shared schemas. They do not collapse. Aurora stays fail-closed. The agent never mutates FieldTick. `act.device` is not a default capability.
+
+```
+HUMAN  ──chat──►  SELF  ──ActionProposal──►  Operator ABI  ──FieldDelta──►  FieldTick
+  ▲                                                                              │
+  └────────────────────────────── observe ───────────────────────────────────────┘
+
+WORLD  ──FieldObservation──►  metafield_bridge ──JSONL──►  torch HUD
+                              └── aurora.action_layer (ESCAPE sovereign)
+```
+
+See [docs/AGENT_LOOP.md](docs/AGENT_LOOP.md) for the contract.
 
 ---
 
-## Startup walkthrough
+## Agent loop (no hardware)
+
+```bash
+python -m agent.test_invariants
+python -m agent.chat --once "What do you perceive?"
+python -m agent.chat --once "Probe the energy peak"
+python -m agent.chat --live --once "What do you perceive?"
+python -m agent.chat --live --follow
+```
+
+`:snap` and `:step` work in the interactive REPL. Chat is an actuator — SPEAK, PROBE, REMEMBER, ATTEND are validated actions, not special cases.
+
+Portable TypeScript twins of the same kernel: [`web/`](web/README.md).
+
+---
+
+## Startup walkthrough (live observer)
 
 ### 0. Once
 
@@ -58,11 +90,19 @@ Paths:
 - Digest: `/tmp/metafield/obs_digest.json`
 - Actions: `/tmp/metafield/aurora_actions.jsonl`
 - Escape: Redis `aurora:control:escape`
+- Agent memory: `/tmp/metafield/agent_memory.jsonl`
 
 Equivalent explicit:
 
 ```bash
 python -m observer.startup --torch --action --action-mode cautious
+```
+
+Then, separately (does not bind :4210):
+
+```bash
+python -m agent.chat --live --follow
+python -m agent.chat --live
 ```
 
 ### 3. Torch only
@@ -129,6 +169,7 @@ python run.py --udp
 
 | Doc | Content |
 |-----|---------|
+| [docs/AGENT_LOOP.md](docs/AGENT_LOOP.md) | FieldTick · ABI · chat as actuator · Aurora mapping |
 | [docs/CONTROL.md](docs/CONTROL.md) | Conductor + Aurora |
 | [docs/MEASUREMENT.md](docs/MEASUREMENT.md) | Fine windows |
 | [docs/SNAKE_PATH.md](docs/SNAKE_PATH.md) | CYD → host |
@@ -136,4 +177,18 @@ python run.py --udp
 | [docs/AURORA_ACTION.md](docs/AURORA_ACTION.md) | Action layer + escape |
 | [docs/EXTRACTION_TRIBSTRUCT.md](docs/EXTRACTION_TRIBSTRUCT.md) | Cube/ensemble patterns |
 
-Synthetic fixtures: `dev/` only — not operational.
+Synthetic fixtures: `dev/` only — not operational. `agent/` synthetic CSI is a **loop fixture** so the ABI can be tested without the snake.
+
+---
+
+## Sibling repos (do not recreate here)
+
+| Repo | Role |
+|------|------|
+| [self-state-kernel](https://github.com/TheBabelDragon/self-state-kernel) | Canonical SELF kernel |
+| [metafield-operator-abi](https://github.com/TheBabelDragon/metafield-operator-abi) | Canonical ABI |
+| [metafield-engine](https://github.com/TheBabelDragon/metafield-engine) | Canonical FieldTick engine |
+| [metafield](https://github.com/TheBabelDragon/metafield) | Research / FieldMemory |
+| [wifi-sensing-system](https://github.com/TheBabelDragon/wifi-sensing-system) | CSI organ |
+
+`agent/` here is the **adapter that makes them talk** inside the live observer, not a rewrite of those repos.
