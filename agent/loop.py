@@ -6,14 +6,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from agent.bridge import packet_to_observation
+from agent.bridge import aurora_intent_to_proposal, packet_to_observation
 from agent.engine import FieldScheduler, seed_field, tick_summary
+from agent.feeds import JsonlCursor, append_jsonl
 from agent.memory import MemoryStore
 from agent.operator_abi import AbiDecision, OperatorAbi
 from agent.perception import chat_perception, make_synthetic_csi, observation_to_perception
 from agent.reason import ReasoningContext, mock_reason
 from agent.schemas import ActionProposal, Channel, FieldObservation, PerceptionEvent
-from agent.self_state import SelfStateKernel, create_self_state
+from agent.self_state import create_self_state
 
 DT = 0.125
 
@@ -39,6 +40,12 @@ class World:
         self.last_decision: AbiDecision | None = None
         self.last_proposal: ActionProposal | None = None
         self.last_perception: PerceptionEvent | None = None
+        self.live = False
+        self.csi_cursor: JsonlCursor | None = None
+        self.aurora_cursor: JsonlCursor | None = None
+        self.ticks_path: Path | None = None
+        self.packets_ingested = 0
+        self.aurora_seen = 0
         self.messages: list[dict[str, Any]] = [
             {
                 "role": "system",
@@ -47,29 +54,103 @@ class World:
             }
         ]
 
-    def step(self, obs: FieldObservation | None = None) -> None:
-        if obs is None:
+    def attach_feeds(
+        self,
+        *,
+        csi: Path | None = None,
+        aurora: Path | None = None,
+        ticks: Path | None = None,
+        warmup: int = 32,
+    ) -> dict[str, int]:
+        """Follow live JSONL. Does not bind UDP. Returns warmup ingest counts."""
+        if csi is not None or aurora is not None:
+            self.live = True
+        counts = {"csi": 0, "aurora": 0}
+        if csi is not None:
+            self.csi_cursor = JsonlCursor(csi)
+            for pkt in self.csi_cursor.catch_up_keep(warmup):
+                if self.ingest_packet(pkt):
+                    counts["csi"] += 1
+        if aurora is not None:
+            self.aurora_cursor = JsonlCursor(aurora)
+            for pkt in self.aurora_cursor.catch_up_keep(warmup):
+                if self.observe_aurora(pkt):
+                    counts["aurora"] += 1
+        self.ticks_path = ticks
+        return counts
+
+    def drain_feeds(self) -> dict[str, int]:
+        counts = {"csi": 0, "aurora": 0}
+        if self.csi_cursor is not None:
+            for pkt in self.csi_cursor.poll():
+                if self.ingest_packet(pkt):
+                    counts["csi"] += 1
+        if self.aurora_cursor is not None:
+            for pkt in self.aurora_cursor.poll():
+                if self.observe_aurora(pkt):
+                    counts["aurora"] += 1
+        return counts
+
+    def step(self, obs: FieldObservation | None = None, *, force_synthetic: bool = False) -> None:
+        if obs is None and (force_synthetic or not self.live):
             obs = make_synthetic_csi(self.scheduler.sequence + 1)
-        self.last_obs = obs
+        if obs is not None:
+            self.last_obs = obs
         self.scheduler.bind_observation(obs)
         commit = self.scheduler.step(DT)
         self.last_hash = commit.hash
-        if commit.tick.sequence % 8 == 0:
+        if obs is not None and commit.tick.sequence % 8 == 0:
             perc = observation_to_perception(obs, commit.tick.sequence)
             self.self.SET("working.last_csi", {
                 "energy": perc.features.get("energy"),
                 "rssi": perc.features.get("rssi_dbm"),
                 "tick": commit.tick.sequence,
+                "body": obs.body_id,
+                "synthetic": obs.synthetic,
             })
+        self._journal_tick(commit.tick.sequence)
 
-    def ingest_packet(self, packet: dict[str, Any]) -> None:
+    def ingest_packet(self, packet: dict[str, Any]) -> bool:
         obs = packet_to_observation(packet)
+        if obs is None:
+            return False
         self.step(obs)
+        self.packets_ingested += 1
+        return True
+
+    def observe_aurora(self, intent: dict[str, Any]) -> bool:
+        """See an Aurora journal line. Local FieldDelta only. Not a hardware fire."""
+        if not isinstance(intent, dict):
+            return False
+        if not (intent.get("action") or intent.get("type")):
+            return False
+        proposal = aurora_intent_to_proposal(intent, observation_id=f"aurora_{self.scheduler.sequence}")
+        decision = self.abi.validate(proposal, self.scheduler.field, self.scheduler.sequence + 1)
+        self.self.SET("working.last_aurora", {
+            "action": proposal.action_type,
+            "accepted": decision.accepted,
+            "reason": proposal.rationale,
+            "tick": self.scheduler.sequence,
+        })
+        if decision.accepted and decision.deltas:
+            self.scheduler.queue_agent_deltas(decision.deltas)
+            self.step(None)
+        if decision.accepted and decision.attend:
+            self.self.SET("attention.target", decision.attend)
+        self.memory.append(
+            tick=self.scheduler.sequence,
+            text=f"aurora: {proposal.action_type} {proposal.rationale}",
+            kind="episodic",
+            tags=["aurora", proposal.action_type.lower()],
+        )
+        self.aurora_seen += 1
+        return True
 
     def handle_human(self, text: str) -> Turn | None:
         trimmed = text.strip()
         if not trimmed:
             return None
+        self.drain_feeds()
         tick = self.scheduler.sequence
         perception = chat_perception(trimmed, tick)
         self.last_perception = perception
@@ -143,7 +224,7 @@ class World:
             "accepted": decision.accepted,
             "provider": "mock",
         })
-        self.step()
+        self.step(None)
         return Turn(
             perception=perception,
             proposal=proposal,
@@ -174,7 +255,28 @@ class World:
             "by_system": summary.get("by_system", {}),
             "last_proposal": self.last_proposal.as_dict() if self.last_proposal else None,
             "last_accepted": None if self.last_decision is None else self.last_decision.accepted,
+            "live": self.live,
+            "packets_ingested": self.packets_ingested,
+            "aurora_seen": self.aurora_seen,
+            "csi_body": None if self.last_obs is None else self.last_obs.body_id,
+            "csi_synthetic": None if self.last_obs is None else self.last_obs.synthetic,
         }
+
+    def _journal_tick(self, sequence: int) -> None:
+        if self.ticks_path is None:
+            return
+        tick = self.scheduler.last
+        summary = tick_summary(tick) if tick else {}
+        append_jsonl(self.ticks_path, {
+            "schema": "metafield.tick",
+            "sequence": sequence,
+            "time": self.scheduler.time,
+            "hash": self.last_hash,
+            "delta_count": summary.get("delta_count", 0),
+            "by_system": summary.get("by_system", {}),
+            "csi_body": None if self.last_obs is None else self.last_obs.body_id,
+            "synthetic": None if self.last_obs is None else self.last_obs.synthetic,
+        })
 
     def _reasoning_context(self, observation_id: str, user_text: str) -> ReasoningContext:
         field = self.scheduler.field

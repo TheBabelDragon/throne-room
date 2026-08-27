@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""FieldTick replay + ABI + bridge invariants. No hardware required.
+"""FieldTick replay + ABI + bridge + live-feed invariants. No hardware required.
 
     python -m agent.test_invariants
 """
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -157,6 +158,79 @@ class LoopTests(unittest.TestCase):
             world.handle_human("Remember this field state")
             self.assertTrue(any("Tick" in e.text or "energy" in e.text for e in world.memory.entries))
             self.assertTrue(path.exists())
+
+
+class FeedTests(unittest.TestCase):
+    def test_invalid_packet_does_not_tick(self) -> None:
+        world = World()
+        seq = world.scheduler.sequence
+        self.assertFalse(world.ingest_packet({"nope": True}))
+        self.assertEqual(world.scheduler.sequence, seq)
+
+    def test_live_csi_then_chat_does_not_inject_synthetic(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            csi = Path(td) / "csi.jsonl"
+            pkt = {
+                "type": "wifi_csi",
+                "node": "cyd-a",
+                "rssi": -40,
+                "csi": [0.8] * 32,
+            }
+            csi.write_text(json.dumps(pkt) + "\n")
+            world = World(memory_path=Path(td) / "mem.jsonl")
+            counts = world.attach_feeds(csi=csi, warmup=8)
+            self.assertEqual(counts["csi"], 1)
+            self.assertTrue(world.live)
+            self.assertEqual(world.last_obs.body_id, "cyd-a")
+            self.assertFalse(world.last_obs.synthetic)
+            seq = world.scheduler.sequence
+            world.handle_human("What do you perceive?")
+            self.assertEqual(world.scheduler.sequence, seq + 1)
+            self.assertFalse(world.last_obs.synthetic)
+            self.assertEqual(world.last_obs.body_id, "cyd-a")
+
+    def test_cursor_does_not_reingest(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            csi = Path(td) / "csi.jsonl"
+            csi.write_text(json.dumps({"type": "wifi_csi", "node": "a", "rssi": -50, "csi": [0.3] * 32}) + "\n")
+            world = World()
+            world.attach_feeds(csi=csi, warmup=8)
+            n1 = world.packets_ingested
+            self.assertEqual(world.drain_feeds()["csi"], 0)
+            self.assertEqual(world.packets_ingested, n1)
+            with csi.open("a") as fh:
+                fh.write(json.dumps({"type": "wifi_csi", "node": "b", "rssi": -48, "csi": [0.4] * 32}) + "\n")
+            got = world.drain_feeds()
+            self.assertEqual(got["csi"], 1)
+            self.assertEqual(world.last_obs.body_id, "b")
+
+    def test_aurora_probe_commits_locally_not_device(self) -> None:
+        world = World()
+        world.live = True
+        e0 = world.scheduler.field.sum(Channel.Energy)
+        ok = world.observe_aurora({
+            "action": "probe",
+            "priority": 0.85,
+            "reason": "field pressure",
+            "body_id": "cyd-a",
+            "params": {"pressure": 0.85},
+        })
+        self.assertTrue(ok)
+        self.assertGreater(world.scheduler.field.sum(Channel.Energy), e0)
+        self.assertFalse(world.abi.has("act.device"))
+        self.assertEqual(world.self.peek("working.last_aurora")["action"], "PROBE")
+
+    def test_tick_journal(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            ticks = Path(td) / "ticks.jsonl"
+            world = World()
+            world.ticks_path = ticks
+            world.step()
+            self.assertTrue(ticks.exists())
+            rec = json.loads(ticks.read_text().splitlines()[0])
+            self.assertEqual(rec["schema"], "metafield.tick")
+            self.assertEqual(rec["sequence"], 1)
+            self.assertEqual(rec["hash"], world.last_hash)
 
 
 def main() -> None:

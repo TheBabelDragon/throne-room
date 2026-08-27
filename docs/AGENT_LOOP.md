@@ -87,9 +87,16 @@ python -m agent.test_invariants
 # chat on synthetic field
 python -m agent.chat --once "What do you perceive?"
 
-# chat on live CSI JSONL the bridge already writes
-python -m agent.chat --csi /tmp/metafield/csi.jsonl
+# same loop, live CSI + Aurora journals (no second UDP bind)
+python -m agent.chat --live --once "What do you perceive?"
+
+# FieldTick follower next to the conductor
+python -m observer.startup --full
+python -m agent.chat --live --follow
 ```
+
+`--live` tails `/tmp/metafield/csi.jsonl` and `aurora_actions.jsonl`. Aurora probes
+commit **local** FieldDeltas so SELF sees them. Redis ESCAPE still gates hardware.
 
 Full hardware stack is unchanged:
 

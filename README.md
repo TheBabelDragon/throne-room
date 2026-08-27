@@ -28,7 +28,8 @@ See [docs/AGENT_LOOP.md](docs/AGENT_LOOP.md) for the contract.
 python -m agent.test_invariants
 python -m agent.chat --once "What do you perceive?"
 python -m agent.chat --once "Probe the energy peak"
-python -m agent.chat --csi /tmp/metafield/csi.jsonl
+python -m agent.chat --live --once "What do you perceive?"
+python -m agent.chat --live --follow
 ```
 
 `:snap` and `:step` work in the interactive REPL. Chat is an actuator — SPEAK, PROBE, REMEMBER, ATTEND are validated actions, not special cases.
@@ -100,7 +101,8 @@ python -m observer.startup --torch --action --action-mode cautious
 Then, separately (does not bind :4210):
 
 ```bash
-python -m agent.chat --csi /tmp/metafield/csi.jsonl
+python -m agent.chat --live --follow
+python -m agent.chat --live
 ```
 
 ### 3. Torch only
