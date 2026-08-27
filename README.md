@@ -232,29 +232,65 @@ git clone https://github.com/TheBabelDragon/throne-room.git
 git clone https://github.com/TheBabelDragon/metafield.git          # optional FieldMemory
 # engine / ABI / SELF stay sibling-canonical; throne-room adapters them, does not vendor them
 cd throne-room && python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
+pip install torch   # optional language-arm decoder. numpy stays the default.
 ```
 
-| Window | Directory | Command | What you are looking at |
-|--------|-----------|---------|-------------------------|
-| 1 · snake / CSI | `wifi-sensing-system` firmware on CYDs | power + UDP :4210 | Physical organ. Only **one** process binds 4210. |
-| 2 · conductor | `~/projects/throne-room` | `python -m observer.startup --full` | Bridge → digest → torch HUD → Aurora (fail-closed) |
-| 3 · agent REPL | `~/projects/throne-room` | `python -m agent.chat --live` | Chat as actuator. `:snap` `:drain` `:status` `:q` |
-| 4 · follow | `~/projects/throne-room` | `python -m agent.chat --live --follow` | CSI/Aurora → FieldTick. No UDP bind. No REPL. |
-| 5 · language arm | `~/projects/throne-room` | `python -m agent.language.train && python -m agent.chat --arm model --live` | Local action head. No API. |
-| 6 · engine (when you are changing ticks) | `metafield-engine` | its own tests | Canonical World. Do not patch it from throne-room. |
-| 7 · ABI / SELF | `metafield-operator-abi` / `self-state-kernel` | their tests | Contracts. throne-room `agent/` is the adapter. |
-| 8 · bodies | `optical-body-s3` / `echo-grid-ultrasonic-os` / `hall-node-s3` / `zvs-node` | flash firmware | Organs emit FieldObservation. They do not run MetaField. |
-| 9 · field-bus / arty | `field-bus` / `arty-realtime` | bring-up docs there | Fast physical loop. Slow model loop stays in throne-room. |
-| 10 · aurora private | `aurora-coordination` | ESCAPE / Redis | Device actuators. `act.device` is **not** default here. |
+Two desks. Same venv. Same `/tmp/metafield` journals.
 
-Offline, no hardware — windows 3+5 only:
+### A · no hardware (language arm)
+
+| Window | Directory | Command | Looking at |
+|--------|-----------|---------|------------|
+| A1 · invariants | `~/projects/throne-room` | `python -m agent.test_invariants` | FieldTick replay, ABI, arm. Torch tests skip if torch is missing. |
+| A2 · numpy train | same | `python -m agent.language.train --examples 64 --steps 40` | fastText action head. Writes `/tmp/metafield/arm_dec_v0.npz`. |
+| A3 · torch train | same | `python -m agent.language.torch_train --examples 64 --steps 16` | Decoder blocks + action head. Writes `/tmp/metafield/arm_gpt_v0.pt`. |
+| A4 · teacher REPL | same | `python -m agent.chat --arm teacher` | Structured policy. `compose()` is the voice. `:snap` `:arm` `:q` |
+| A5 · model REPL | same | `python -m agent.chat --arm model --backend torch --learn` | Trained head. `--learn` imitates the **teacher label**. Abstains if `p < 0.22`. |
+
+Smoke without a REPL:
 
 ```bash
-cd ~/projects/throne-room && source .venv/bin/activate
-python -m agent.test_invariants
-python -m agent.language.train --examples 64 --steps 40
-python -m agent.chat --arm model --once "Probe the energy peak"
-python -m agent.chat --arm teacher
+python -m agent.chat --arm teacher --once "What do you perceive?"
+python -m agent.chat --arm model --backend numpy --once "Probe the energy peak"
+python -m agent.chat --arm model --backend torch --once "Probe the energy peak"
 ```
 
 `--ticks` is a **count** (offline synthetic warmup). Journal path is `--journal`. Do not pass a file to `--ticks`.
+
+### B · live observer (snake on)
+
+Power CYD CSI senders + bridge ESP32s so UDP reaches the host on **:4210**. Only **one** process binds 4210 (window B1).
+
+| Window | Directory | Command | Looking at |
+|--------|-----------|---------|------------|
+| B1 · conductor | `~/projects/throne-room` | `python -m observer.startup --full` | Bridge :4210 → digest → torch HUD → Aurora (fail-closed). |
+| B2 · agent REPL | same | `python -m agent.chat --live --arm model --backend torch` | Chat as actuator on live CSI. Does **not** bind UDP. `:snap` `:drain` `:status` `:arm` `:q` |
+| B3 · follow | same | `python -m agent.chat --live --follow` | CSI/Aurora → FieldTick. No REPL. Watch the journal. |
+| B4 · snake | `wifi-sensing-system` firmware on CYDs | power + UDP :4210 | Physical organ. If this is quiet, B1 prints `csi_stale`. |
+| B5 · engine | `metafield-engine` | its own tests | Canonical World. Do not patch it from throne-room. |
+| B6 · ABI / SELF | `metafield-operator-abi` / `self-state-kernel` | their tests | Contracts. `agent/` here is the adapter. |
+| B7 · bodies | `optical-body-s3` / `echo-grid-ultrasonic-os` / `hall-node-s3` / `zvs-node` | flash firmware | Organs emit FieldObservation. They do not run MetaField. |
+| B8 · field-bus / arty | `field-bus` / `arty-realtime` | bring-up docs there | Fast physical loop. Slow model loop stays in throne-room. |
+| B9 · aurora private | `aurora-coordination` | ESCAPE / Redis | Device actuators. `act.device` is **not** default here. |
+
+Journals (all under `/tmp/metafield/`):
+
+| File | Writer | Reader |
+|------|--------|--------|
+| `csi.jsonl` | bridge (B1) | HUD, agent `--live`, consumer |
+| `aurora_actions.jsonl` | aurora.action_layer | agent `--live`, HUD |
+| `agent_ticks.jsonl` | agent loop | replay |
+| `arm_dec_v0.npz` | numpy train | `--backend numpy` |
+| `arm_gpt_v0.pt` | torch train | `--backend torch` / auto |
+| `arm_trajectories.jsonl` | `--live` agent | mix into the next train |
+| `obs_digest.json` | conductor | health |
+| `bridge.log` | metafield_bridge | debug |
+
+`Ctrl+C` the conductor stops its children. Follow and REPL are separate processes — stop those yourself.
+
+Paths if you `cd`'d off:
+
+```bash
+cd ~/projects/throne-room
+source .venv/bin/activate
+```
