@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Pause, Play, RotateCcw } from "lucide-react";
+import { IconPause, IconPlay, IconReset } from "./icons";
 import { Button } from "./button";
 import { ChatPanel } from "./chat-panel";
 import { FieldPanel } from "./field-panel";
@@ -44,10 +44,10 @@ export function ThroneRoom() {
             aria-label={snap.running ? "Pause field" : "Run field"}
             onClick={() => world.setRunning(!snap.running)}
           >
-            {snap.running ? <Pause className="size-4" /> : <Play className="ml-px size-4" />}
+            {snap.running ? <IconPause className="size-4" /> : <IconPlay className="ml-px size-4" />}
           </Button>
           <Button variant="ghost" size="icon" aria-label="Reset world" onClick={() => world.reset()}>
-            <RotateCcw className="size-4" />
+            <IconReset className="size-4" />
           </Button>
           <Button
             variant={snap.provider === "live" ? "primary" : "outline"}

@@ -1,6 +1,6 @@
 [project]
 name = "throne-room"
-version = "0.7.0"
+version = "0.7.1"
 description = "Operational Field Observer + agent-in-a-world loop for the MetaField stack"
 readme = "README.md"
 requires-python = ">=3.10"

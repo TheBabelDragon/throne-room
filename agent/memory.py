@@ -15,11 +15,11 @@ MAX_LIVE = 2000
 
 class MemoryStore:
     def __init__(self, path: Path | None = None) -> None:
-        self.path = path or DEFAULT_PATH
+        self.path = path
         self.entries: list[MemoryEntry] = []
 
     def load(self) -> None:
-        if not self.path.exists():
+        if self.path is None or not self.path.exists():
             return
         loaded: list[MemoryEntry] = []
         try:
@@ -91,6 +91,8 @@ class MemoryStore:
         return list(reversed(self.entries[-limit:]))
 
     def _persist(self, entry: MemoryEntry) -> None:
+        if self.path is None:
+            return
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             with self.path.open("a", encoding="utf-8") as fh:

@@ -14,6 +14,7 @@ It starts and supervises the observation stack end-to-end, writes an Aurora-faci
 5. optical_serial_consumer  ← promote to FieldMemoryEntry (if MetaField found)
 6. aurora_action      ← policies + Redis escape (optional, --action / --full)
 7. Aurora digest loop ← /tmp/metafield/obs_digest.json + optional metafield_sensing tick
+8. agent.chat --live  ← optional sibling. Tails CSI + Aurora JSONL. Does not bind :4210.
 ```
 
 ## Launch
@@ -30,6 +31,9 @@ python -m observer.startup --full --metafield-root ~/projects/metafield
 
 # bridge + digest only
 python -m observer.startup --no-view --no-consumer --no-torch
+
+# agent loop on the same journals (separate process, no UDP)
+python -m agent.chat --live --follow
 ```
 
 Environment:

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { Send } from "lucide-react";
+import { IconSend } from "./icons";
 import { Button } from "./button";
 import type { World } from "../src/world";
 import type { WorldSnapshot } from "../src/world";
@@ -104,7 +104,7 @@ export function ChatPanel({ snap, world }: { snap: WorldSnapshot; world: World }
           className="min-h-11 flex-1 resize-none rounded-md bg-elevated px-3 py-2.5 text-sm text-fg placeholder:text-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60"
         />
         <Button type="submit" size="icon" disabled={snap.reasoning || !draft.trim()} aria-label="Send">
-          <Send className="size-4" />
+          <IconSend className="size-4" />
         </Button>
       </form>
     </section>

@@ -60,7 +60,7 @@ export class World {
   lastObs: FieldObservation | null = null;
   lastHash = "00000000";
   running = true;
-  provider: "mock" | "live" = "live";
+  provider: "mock" | "live" = "mock";
   aiAvailable = false;
   reasoning = false;
   liveReason: ((

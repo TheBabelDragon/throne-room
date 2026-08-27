@@ -15,6 +15,9 @@ These files are the same schemas the Python `agent/` package implements:
 | `src/memory.ts` | `agent/memory.py` |
 | `src/reasoning.ts` | `agent/reason.py` |
 | `src/hash.ts` | `agent/hashutil.py` |
+| `src/world.ts` | `agent/loop.py` |
+| `src/repos.ts` | sibling repo map |
+
 
 The live React HUD (chat + lattice + SELF panel) was proven in Grok Build
 against this kernel. Drop these modules into any host. Do not put an LLM
