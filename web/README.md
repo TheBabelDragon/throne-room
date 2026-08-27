@@ -19,3 +19,9 @@ These files are the same schemas the Python `agent/` package implements:
 The live React HUD (chat + lattice + SELF panel) was proven in Grok Build
 against this kernel. Drop these modules into any host. Do not put an LLM
 inside `engine.ts`.
+
+## HUD
+
+`hud/` is the React operator surface proven against this kernel (chat + lattice + SELF).
+Host it in any React app. Live LLM injection is optional via `World.liveReason`.
+Do not import a host framework into `src/engine.ts`.
