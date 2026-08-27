@@ -176,6 +176,14 @@ class DecoderTransformer:
         idx = int(np.argmax(self.action_logits(ids)))
         return ACTION_ORDER[idx]
 
+    def predict_action_p(self, ids: list[int]) -> tuple[str, float]:
+        logits = self.action_logits(ids)
+        z = logits.astype(np.float64) - np.max(logits)
+        e = np.exp(z)
+        p = e / np.sum(e)
+        idx = int(np.argmax(p))
+        return ACTION_ORDER[idx], float(p[idx])
+
     def generate(self, ids: list[int], *, max_new: int = 48, eos: int | None = None) -> list[int]:
         out = list(ids)
         new: list[int] = []

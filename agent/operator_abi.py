@@ -111,7 +111,7 @@ class OperatorAbi:
                     nxt = min(1.0, old + w * (1 - old))
                     deltas.append(FieldDelta(c, Channel.Energy, old, nxt, tick, SYS.AGENT))
             action = base(True, f"committed PROBE @ {cell.x},{cell.z}", deltas)
-            return AbiDecision(True, action.reason, proposal, action, deltas)
+            return AbiDecision(True, action.reason, proposal, action, deltas, utterance=_voice(proposal, action.reason))
 
         if kind == "REMEMBER":
             note = str(proposal.parameters.get("note") or proposal.rationale or "").strip()
@@ -119,12 +119,12 @@ class OperatorAbi:
                 action = base(False, "REMEMBER requires parameters.note")
                 return AbiDecision(False, action.reason, proposal, action, [])
             action = base(True, "committed REMEMBER")
-            return AbiDecision(True, action.reason, proposal, action, [], memory_note=note)
+            return AbiDecision(True, action.reason, proposal, action, [], memory_note=note, utterance=_voice(proposal, f"REMEMBER. {note}"))
 
         if kind == "ATTEND":
             target = str(proposal.parameters.get("target") or proposal.target or "field").strip()
             action = base(True, f"committed ATTEND {target}")
-            return AbiDecision(True, action.reason, proposal, action, [], attend=target)
+            return AbiDecision(True, action.reason, proposal, action, [], attend=target, utterance=_voice(proposal, action.reason))
 
         if kind == "SET_GOAL":
             text = str(proposal.parameters.get("text") or "").strip()
@@ -132,14 +132,23 @@ class OperatorAbi:
                 action = base(False, "SET_GOAL requires parameters.text")
                 return AbiDecision(False, action.reason, proposal, action, [])
             action = base(True, "committed SET_GOAL")
-            return AbiDecision(True, action.reason, proposal, action, [], goal=text)
+            return AbiDecision(True, action.reason, proposal, action, [], goal=text, utterance=_voice(proposal, f"SET_GOAL. {text}"))
 
         if kind == "QUERY_FIELD":
             action = base(True, "committed QUERY_FIELD")
-            return AbiDecision(True, action.reason, proposal, action, [], query="field")
+            return AbiDecision(True, action.reason, proposal, action, [], query="field", utterance=_voice(proposal, "QUERY_FIELD"))
 
         action = base(True, "committed WAIT")
-        return AbiDecision(True, action.reason, proposal, action, [])
+        return AbiDecision(True, action.reason, proposal, action, [], utterance=_voice(proposal, "WAIT"))
+
+
+def _voice(proposal: ActionProposal, fallback: str) -> str:
+    params = proposal.parameters or {}
+    for key in ("utterance", "text"):
+        s = str(params.get(key) or "").strip()
+        if s:
+            return s[:2000]
+    return fallback[:2000]
 
 
 def _clamp01(n: float) -> float:

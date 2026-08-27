@@ -120,6 +120,31 @@ def train_epoch(model: DecoderTransformer, train: list[Example], lr: float, rng:
     }
 
 
+def learn_one(model: DecoderTransformer, prompt: list[int], action_index: int, *, lr: float = 1.0) -> dict:
+    """Single-example CE on the action head. Used by `--learn` in the live loop."""
+    span = model.action_span(prompt)
+    bag_hat, _, nrm = model.embed_bag(span)
+    grams = hashed_ngrams(span, model.ngram_dim)
+    feat = np.concatenate([model.bag_scale * bag_hat, grams]).astype(np.float32)
+    logits = feat @ model.w_act + model.b_act
+    loss, d_act = _ce_scalar(logits, action_index)
+    d_feat = model.w_act @ d_act
+    model.w_act -= lr * (np.outer(feat, d_act) + 1e-4 * model.w_act)
+    model.b_act -= lr * d_act
+    d_bag = d_feat[: model.d_model] * model.bag_scale
+    if nrm >= 1e-8 and span:
+        d_h = (d_bag - bag_hat * float(np.dot(d_bag, bag_hat))) / nrm
+        d_vec = (d_h / max(1, len(span))).astype(np.float32)
+        np.add.at(model.tok, np.array(span, dtype=np.int64), -lr * d_vec)
+        np.clip(model.tok, -2.0, 2.0, out=model.tok)
+    pred_i = int(np.argmax(logits))
+    return {
+        "act_loss": loss,
+        "pred": ACTION_ORDER[pred_i],
+        "gold": ACTION_ORDER[action_index],
+    }
+
+
 def evaluate(model: DecoderTransformer, examples: list[Example]) -> dict:
     correct = 0
     by: dict[str, list[int]] = defaultdict(lambda: [0, 0])

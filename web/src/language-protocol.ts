@@ -55,4 +55,7 @@ export type LanguageOutput = {
   tokenizer_version: string;
   model_version: string;
   prompt_tokens: number[];
+  confidence: number;
+  predicted_action: string;
+  abstained: boolean;
 };

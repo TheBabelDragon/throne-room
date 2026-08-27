@@ -135,6 +135,9 @@ class LanguageOutput:
     tokenizer_version: str
     model_version: str
     prompt_tokens: list[int] = field(default_factory=list)
+    confidence: float = 1.0
+    predicted_action: str = ""
+    abstained: bool = False
     schema: str = SCHEMA_OUTPUT
     version: int = SCHEMA_VERSION
 
@@ -149,6 +152,9 @@ class LanguageOutput:
             "tokenizer_version": self.tokenizer_version,
             "model_version": self.model_version,
             "prompt_tokens": list(self.prompt_tokens),
+            "confidence": round(self.confidence, 4),
+            "predicted_action": self.predicted_action,
+            "abstained": self.abstained,
         }
 
 

@@ -1,8 +1,8 @@
 """LanguageArm: local Aurora participant.
 
-Joins the loop as a cognition arm. Generates tokens locally. Proposals
-go through the operator ABI. Teacher policy is the action head until a
-trained checkpoint exists — still local, still not an API.
+Joins the loop as a cognition arm. The action head chooses. compose()
+is the voice — the numpy decoder does not speak English. Proposals go
+through the operator ABI. Teacher policy labels online `--learn`.
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
+from agent.language.compose import compose
 from agent.language.protocol import LanguageContext, LanguageOutput
 from agent.language.tokenizer import ACTION_TAGS, ArmTokenizer
 from agent.language.transformer import ACTION_ORDER, MODEL_VERSION, DecoderTransformer
@@ -18,6 +19,7 @@ from agent.reason import ReasoningContext, mock_reason
 from agent.schemas import ActionProposal
 
 ArmMode = Literal["teacher", "model"]
+MIN_P = 0.22
 
 
 def _teacher(ctx: LanguageContext) -> ActionProposal:
@@ -38,48 +40,6 @@ def _teacher(ctx: LanguageContext) -> ActionProposal:
         memories=[m.text for m in ctx.memories],
     )
     return mock_reason(rc)
-
-
-def _parse_structured(text: str, tok: ArmTokenizer, ctx: LanguageContext, ids: list[int] | None = None) -> ActionProposal | None:
-    action = tok.action_from_ids(ids or []) if ids else None
-    if action is None:
-        upper = text
-        for name, tag in ACTION_TAGS.items():
-            if tag in upper:
-                action = name
-                break
-    if action is None:
-        if "<PROPOSE>" in text:
-            action = "SPEAK"
-    if action is None:
-        return None
-    body = text
-    for mark in (*ACTION_TAGS.values(), "<PROPOSE>", "<ARM>", "<EOS>"):
-        if mark in body:
-            body = body.split(mark)[-1]
-    body = body.replace("<EOS>", "").strip()
-    if action == "SPEAK" and not body:
-        return None
-    params: dict = {"text": body[:400]} if action == "SPEAK" else {}
-    if action == "PROBE":
-        peak = ctx.observation.energy_peak
-        params = {"x": peak[0], "z": peak[1], "magnitude": 0.55}
-    if action == "ATTEND":
-        params = {"target": ctx.attention or "field"}
-    if action == "REMEMBER":
-        params = {"note": body[:400] or ctx.user_text}
-    if action == "SET_GOAL":
-        params = {"text": body[:400] or ctx.user_text}
-    if action == "QUERY_FIELD":
-        params = {"text": body[:400] or ctx.user_text}
-    return make_proposal(
-        action_type=action,
-        parameters=params,
-        target="chat" if action == "SPEAK" else "field",
-        rationale="Language arm structured decode.",
-        confidence=0.55,
-        originating_observation=ctx.observation_id,
-    )
 
 
 DEFAULT_CKPT = Path("/tmp/metafield/arm_dec_v0.npz")
@@ -149,8 +109,39 @@ def _ground(action: str, ctx: LanguageContext, teacher: ActionProposal) -> Actio
             originating_observation=ctx.observation_id,
         )
     if action == "SPEAK":
-        return teacher
+        return make_proposal(
+            action_type="SPEAK",
+            parameters={"text": "report"},
+            target="chat",
+            rationale="Action head selected SPEAK.",
+            confidence=0.7,
+            originating_observation=ctx.observation_id,
+        )
     return teacher
+
+
+def _stamp_voice(
+    proposal: ActionProposal,
+    ctx: LanguageContext,
+    *,
+    abstained: bool,
+    confidence: float,
+) -> str:
+    text = compose(
+        proposal.action_type,
+        ctx,
+        proposal,
+        abstained=abstained,
+        confidence=confidence,
+    )
+    if proposal.action_type == "SPEAK":
+        proposal.parameters["text"] = text
+    else:
+        proposal.parameters["utterance"] = text
+        if proposal.action_type == "QUERY_FIELD":
+            proposal.parameters["text"] = text
+    proposal.confidence = float(confidence)
+    return text
 
 
 def _find_checkpoint(explicit: Path | None = None) -> Path | None:
@@ -174,9 +165,12 @@ class LanguageArm:
         mode: ArmMode = "teacher",
         tokenizer: ArmTokenizer | None = None,
         model: DecoderTransformer | None = None,
-        max_new: int = 32,
+        max_new: int = 0,
         trajectory_path: Path | None = None,
         checkpoint: Path | None = None,
+        learn: bool = False,
+        min_p: float = MIN_P,
+        learn_lr: float = 1.0,
     ) -> None:
         self.mode: ArmMode = mode
         if tokenizer is None:
@@ -198,46 +192,62 @@ class LanguageArm:
             self.checkpoint = None
         self.max_new = max_new
         self.trajectory_path = trajectory_path
+        self.learn = learn
+        self.min_p = min_p
+        self.learn_lr = learn_lr
         self.last: LanguageOutput | None = None
         self.steps = 0
+        self.learn_steps = 0
 
     def act(self, ctx: LanguageContext) -> LanguageOutput:
         prompt = self.tokenizer.encode_context(ctx)
         teacher = _teacher(ctx)
+        predicted = teacher.action_type
+        confidence = 1.0
+        abstained = False
+        source: ArmMode = "teacher"
+        if self.mode == "model":
+            predicted, confidence = self.model.predict_action_p(prompt)
+            if predicted not in ACTION_ORDER:
+                predicted = teacher.action_type
+            if confidence < self.min_p:
+                abstained = True
+                predicted = "WAIT"
+            source = "model"
+        proposal = teacher if source == "teacher" else _ground(predicted, ctx, teacher)
+        text = _stamp_voice(proposal, ctx, abstained=abstained, confidence=confidence)
+        tokens = self.tokenizer.encode_target(proposal)
         if self.max_new > 0:
-            seed = list(prompt)
-            if self.mode == "model":
-                predicted = self.model.predict_action(prompt)
-                seed = seed + self.tokenizer.encode("<PROPOSE>" + _tag_for(predicted))
-            gen = self.model.generate(
+            seed = list(prompt) + self.tokenizer.encode("<PROPOSE>" + _tag_for(proposal.action_type))
+            genesis = self.model.generate(
                 seed,
                 max_new=self.max_new,
                 eos=self.tokenizer.special_id("<EOS>"),
             )
-        else:
-            gen = []
-        raw = self.tokenizer.decode(gen)
-        parsed = _parse_structured(raw, self.tokenizer, ctx, gen)
-        if self.mode == "model":
-            predicted = self.model.predict_action(prompt)
-            if predicted not in ACTION_ORDER:
-                predicted = teacher.action_type
-            proposal = parsed if (parsed and parsed.action_type == predicted) else _ground(predicted, ctx, teacher)
-            source: ArmMode = "model"
-        else:
-            proposal = teacher
-            source = "teacher"
+            tokens = tokens + genesis
+        if self.learn:
+            gold = teacher.action_type
+            if gold in ACTION_ORDER:
+                from agent.language.train import learn_one
+                learn_one(
+                    self.model,
+                    prompt,
+                    ACTION_ORDER.index(gold),
+                    lr=self.learn_lr,
+                )
+                self.learn_steps += 1
         out = LanguageOutput(
-            tokens=gen,
-            text=raw if source == "model" and parsed else str(proposal.parameters.get("text") or raw),
+            tokens=tokens,
+            text=text,
             proposal=proposal,
             source=source,
             tokenizer_version=self.tokenizer.version,
             model_version=MODEL_VERSION,
             prompt_tokens=prompt,
+            confidence=confidence,
+            predicted_action=predicted,
+            abstained=abstained,
         )
-        if proposal.action_type == "SPEAK":
-            out.text = str(proposal.parameters.get("text") or out.text)
         self.last = out
         self.steps += 1
         return out

@@ -32,7 +32,7 @@ python -m agent.chat --live --once "What do you perceive?"
 python -m agent.chat --live --follow
 ```
 
-`:snap` and `:step` work in the interactive REPL. Chat is an actuator — SPEAK, PROBE, REMEMBER, ATTEND are validated actions, not special cases.
+`:snap` `:step` `:status` `:arm` work in the interactive REPL. Chat is an actuator — SPEAK, PROBE, REMEMBER, ATTEND, QUERY_FIELD, WAIT are validated actions, not special cases. The arm's voice is `compose()` over the field, not a chatbot.
 
 Local language arm (no API):
 
@@ -41,9 +41,10 @@ python -m agent.language.harness
 python -m agent.language.train --examples 64 --steps 40
 python -m agent.chat --arm teacher --once "What do you perceive?"
 python -m agent.chat --arm model --once "Probe the energy peak"
+python -m agent.chat --arm model --learn
 ```
 
-See [docs/LANGUAGE_ARM.md](docs/LANGUAGE_ARM.md). Tokenizer and protocol are owned here. The training runtime fits an action head on MetaField trajectories (user-span embeddings ⊕ hashed trigrams). Genesis decoder blocks stay untrained until a torch path exists.
+See [docs/LANGUAGE_ARM.md](docs/LANGUAGE_ARM.md). Tokenizer and protocol are owned here. The training runtime fits an action head on MetaField trajectories. `compose()` is the operator voice — genesis decoder blocks do not speak English. `--learn` does one imitation step per turn from the teacher label.
 
 Portable TypeScript twins of the same kernel: [`web/`](web/README.md).
 

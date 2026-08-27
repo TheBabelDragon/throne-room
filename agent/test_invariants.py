@@ -461,6 +461,66 @@ class ArmTests(unittest.TestCase):
             self.assertGreaterEqual(summary["reload_acc"], 0.5)
             self.assertEqual(summary["model"], "arm-dec-v1")
 
+    def test_compose_is_the_operator_voice(self) -> None:
+        world = World()
+        world.step()
+        turn = world.handle_human("What do you perceive?")
+        assert turn is not None
+        self.assertEqual(turn.proposal.action_type, "SPEAK")
+        text = turn.utterance or ""
+        self.assertIn("SELF", text)
+        self.assertIn("E=", text)
+        self.assertIn("I report", text)
+        self.assertIn("agency without authority", text)
+
+    def test_query_returns_a_field_report(self) -> None:
+        world = World()
+        world.step()
+        turn = world.handle_human("Query the field")
+        assert turn is not None
+        self.assertEqual(turn.proposal.action_type, "QUERY_FIELD")
+        self.assertIn("QUERY", turn.utterance or "")
+        self.assertIn("E=", turn.utterance or "")
+        self.assertTrue(turn.decision.accepted)
+
+    def test_probe_utterance_names_the_cell(self) -> None:
+        world = World()
+        world.step()
+        turn = world.handle_human("Probe the energy peak")
+        assert turn is not None
+        self.assertEqual(turn.proposal.action_type, "PROBE")
+        self.assertIn("PROBE @", turn.utterance or "")
+
+    def test_model_abstains_below_min_p(self) -> None:
+        from agent.language.arm import LanguageArm
+        from agent.language.transformer import DecoderTransformer
+        tok = ArmTokenizer()
+        world = World()
+        world.arm = LanguageArm(
+            mode="model",
+            tokenizer=tok,
+            model=DecoderTransformer(tok.vocab_size, seed=3),
+            min_p=0.99,
+        )
+        world.step()
+        turn = world.handle_human("asdf qwer zxcv")
+        assert turn is not None
+        self.assertTrue(world.arm.last.abstained)  # type: ignore[union-attr]
+        self.assertEqual(turn.proposal.action_type, "WAIT")
+        self.assertIn("holding", (turn.utterance or "").lower())
+
+    def test_learn_one_moves_action_head(self) -> None:
+        import numpy as np
+        from agent.language.train import learn_one
+        from agent.language.transformer import DecoderTransformer
+        tok = ArmTokenizer()
+        model = DecoderTransformer(tok.vocab_size, seed=1)
+        ids = tok.encode("<USER> Probe the energy peak <ARM>")
+        w0 = model.w_act.copy()
+        rec = learn_one(model, ids, 1, lr=1.5)
+        self.assertEqual(rec["gold"], "PROBE")
+        self.assertFalse(np.allclose(w0, model.w_act))
+
 
 def main() -> None:
     suite = unittest.defaultTestLoader.loadTestsFromModule(sys.modules[__name__])

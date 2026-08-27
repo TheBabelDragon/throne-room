@@ -6,6 +6,7 @@ architecture; it satisfies a protocol.
 """
 
 from agent.language.arm import LanguageArm
+from agent.language.compose import compose, field_line
 from agent.language.protocol import (
     ConversationEvent,
     LanguageContext,
@@ -23,4 +24,6 @@ __all__ = [
     "MemoryReference",
     "ParticipantObservation",
     "context_from_world",
+    "compose",
+    "field_line",
 ]

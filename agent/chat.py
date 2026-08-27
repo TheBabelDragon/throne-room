@@ -23,18 +23,24 @@ from agent.loop import World
 
 def _print_turn(world: World, label: str) -> None:
     snap = world.snapshot()
+    last = world.arm.last
+    extra = ""
+    if last is not None:
+        extra = f"  arm={last.source} p={last.confidence:.2f}"
+        if last.abstained:
+            extra += " abstain"
     print(
         f"[{label}] t{format_tick(snap['sequence'])}  "
         f"hash={snap['tick_hash']}  "
         f"E={snap['energy_sum']:.2f}  I={snap['info_sum']:.2f}  "
         f"att={snap['attention']}  "
-        f"accepted={snap['last_accepted']}",
+        f"accepted={snap['last_accepted']}{extra}",
         flush=True,
     )
     if world.messages:
-        last = world.messages[-1]
-        if last.get("role") in {"agent", "system"}:
-            print(f"  {last['role']}: {last['text']}", flush=True)
+        msg = world.messages[-1]
+        if msg.get("role") in {"agent", "system"}:
+            print(f"  {msg['role']}: {msg['text']}", flush=True)
 
 
 def _attach(world: World, args: argparse.Namespace) -> None:
@@ -69,7 +75,7 @@ def _run_turn(world: World, line: str) -> None:
 
 
 def _repl(world: World, interval: float) -> None:
-    print("[agent] type a line. :snap  :drain  :status  :q", flush=True)
+    print("[agent] type a line. :snap  :drain  :status  :arm  :q", flush=True)
     prompt = "operator> "
     use_select = sys.stdin.isatty()
     print(prompt, end="", flush=True)
@@ -118,7 +124,37 @@ def _repl(world: World, interval: float) -> None:
                 f"[status] t{format_tick(snap['sequence'])} live={snap['live']} "
                 f"packets={snap['packets_ingested']} aurora={snap['aurora_seen']} "
                 f"body={snap['csi_body'] or '-'} rssi={snap.get('csi_rssi')} "
-                f"backlog={backlog}B hash={snap['tick_hash']}",
+                f"backlog={backlog}B hash={snap['tick_hash']} "
+                f"arm={snap['arm_mode']} p={snap.get('arm_confidence')} "
+                f"learn={snap.get('arm_learn_steps')}",
+                flush=True,
+            )
+        elif text == ":arm":
+            last = world.arm.last
+            print(
+                json.dumps(
+                    {
+                        "mode": world.arm.mode,
+                        "checkpoint": str(getattr(world.arm, "checkpoint", None)),
+                        "learn": world.arm.learn,
+                        "learn_steps": world.arm.learn_steps,
+                        "min_p": world.arm.min_p,
+                        "model": world.arm.model.version,
+                        "tokenizer": world.arm.tokenizer.version,
+                        "last": None
+                        if last is None
+                        else {
+                            "action": last.proposal.action_type,
+                            "predicted": last.predicted_action,
+                            "confidence": last.confidence,
+                            "source": last.source,
+                            "abstained": last.abstained,
+                            "text": last.text,
+                        },
+                    },
+                    indent=2,
+                    default=str,
+                ),
                 flush=True,
             )
         else:
@@ -138,7 +174,8 @@ def main() -> None:
     parser.add_argument("--memory", type=Path, default=None)
     parser.add_argument("--live", action="store_true", help="Follow /tmp/metafield CSI + Aurora journals")
     parser.add_argument("--follow", action="store_true", help="Tick from feeds (no REPL). Ctrl+C to stop")
-    parser.add_argument("--arm", choices=("teacher", "model"), default="teacher", help="Local language arm. teacher=structured policy, model=tiny decoder decode")
+    parser.add_argument("--arm", choices=("teacher", "model"), default="teacher", help="Local language arm. teacher=structured policy, model=trained action head + composed voice")
+    parser.add_argument("--learn", action="store_true", help="Online imitation: one action-head step per turn using the teacher label")
     parser.add_argument("--interval", type=float, default=0.25)
     args = parser.parse_args()
 
@@ -147,6 +184,7 @@ def main() -> None:
         memory = DEFAULT_MEMORY
     world = World(memory_path=memory)
     world.arm.mode = args.arm  # type: ignore[assignment]
+    world.arm.learn = bool(args.learn)
     if args.live:
         world.trajectory_path = Path("/tmp/metafield/arm_trajectories.jsonl")
     _attach(world, args)

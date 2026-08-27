@@ -227,7 +227,11 @@ class World:
                 "proposal_id": proposal.proposal_id,
             })
         elif decision.accepted:
-            utterance = f"{proposal.action_type} committed. {decision.reason}"
+            utterance = (
+                decision.utterance
+                or output.text
+                or f"{proposal.action_type} committed. {decision.reason}"
+            )
             self.messages.append({
                 "role": "agent",
                 "text": utterance,
@@ -240,6 +244,9 @@ class World:
             "accepted": decision.accepted,
             "provider": output.source,
             "tokenizer": output.tokenizer_version,
+            "confidence": output.confidence,
+            "predicted": output.predicted_action,
+            "abstained": output.abstained,
         })
         self.step(None)
         if self.trajectory_path is not None:
@@ -296,6 +303,9 @@ class World:
             "arm_mode": self.arm.mode,
             "arm_source": None if self.arm.last is None else self.arm.last.source,
             "arm_tokens": 0 if self.arm.last is None else len(self.arm.last.tokens),
+            "arm_confidence": None if self.arm.last is None else self.arm.last.confidence,
+            "arm_predicted": None if self.arm.last is None else self.arm.last.predicted_action,
+            "arm_learn_steps": getattr(self.arm, "learn_steps", 0),
             "tokenizer": self.arm.tokenizer.version,
         }
 
