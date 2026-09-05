@@ -12,7 +12,7 @@ They meet at shared schemas. They do not collapse. Aurora stays fail-closed. The
 ```
 HUMAN  ──chat──►  SELF  ──ActionProposal──►  Operator ABI  ──FieldDelta──►  FieldTick
   ▲                                                                              │
-  └────────────────────────────── observe ───────────────────────────────────────┘
+  └────────────────────────────── observe ────────────────────────────────────│
 
 WORLD  ──FieldObservation──►  metafield_bridge ──JSONL──►  torch HUD
                               └── aurora.action_layer (ESCAPE sovereign)
@@ -20,12 +20,19 @@ WORLD  ──FieldObservation──►  metafield_bridge ──JSONL──►  t
 
 See [docs/AGENT_LOOP.md](docs/AGENT_LOOP.md) for the contract.
 
+Qwuack is the embodied tenant of that loop — habitat `lake`, not god-mode.
+`python -m qwuack.runtime` attaches to the existing World / observer journals
+and never binds UDP :4210. See [qwuack/README.md](qwuack/README.md).
+
 ---
 
 ## Agent loop (no hardware)
 
 ```bash
 python -m agent.test_invariants
+python -m unittest tests.test_qwuack_identity tests.test_qwuack_policy \
+    tests.test_qwuack_runtime tests.test_qwuack_boundary
+python -m qwuack.runtime --once
 python -m agent.chat --once "What do you perceive?"
 python -m agent.chat --once "Probe the energy peak"
 python -m agent.chat --live --once "What do you perceive?"
@@ -104,6 +111,7 @@ Paths:
 - Actions: `/tmp/metafield/aurora_actions.jsonl`
 - Escape: Redis `aurora:control:escape`
 - Agent memory: `/tmp/metafield/agent_memory.jsonl`
+- Qwuack status: `/tmp/metafield/qwuack_status.json`
 
 Equivalent explicit:
 
@@ -116,6 +124,7 @@ Then, separately (does not bind :4210):
 ```bash
 python -m agent.chat --live --follow
 python -m agent.chat --live
+python -m qwuack.runtime --live --follow
 ```
 
 REPL commands: `:snap` `:drain` `:status` `:q`. The prompt no longer blocks CSI ingest — backlog is drained while you sit at `operator>`. Bridge logs: `/tmp/metafield/bridge.log`. Conductor prints `csi_stale` if `/tmp/metafield/csi.jsonl` stops growing.
@@ -186,6 +195,7 @@ python run.py --udp
 
 | Doc | Content |
 |-----|---------|
+| [qwuack/README.md](qwuack/README.md) | Qwuack tenant — habitat, capabilities, closed loop |
 | [docs/LANGUAGE_ARM.md](docs/LANGUAGE_ARM.md) | Local language arm protocol · tokenizer · trajectories |
 | [docs/CONTROL.md](docs/CONTROL.md) | Conductor + Aurora |
 | [docs/MEASUREMENT.md](docs/MEASUREMENT.md) | Fine windows |
@@ -218,7 +228,7 @@ Synthetic fixtures: `dev/` only — not operational. `agent/` synthetic CSI is a
 | [aurora-coordination](https://github.com/TheBabelDragon/aurora-coordination) | Private Overlord / ESCAPE |
 | [zvs-node](https://github.com/TheBabelDragon/zvs-node) | Private ZVS / ultrasonic power stage |
 
-`agent/` here is the **adapter that makes them talk** inside the live observer, not a rewrite of those repos.
+`agent/` here is the **adapter that makes them talk** inside the live observer, not a rewrite of those repos. `qwuack/` is a tenant of that adapter.
 
 ---
 
@@ -246,6 +256,7 @@ Two desks. Same venv. Same `/tmp/metafield` journals.
 | A3 · torch train | same | `python -m agent.language.torch_train --examples 64 --steps 16` | Decoder blocks + action head. Writes `/tmp/metafield/arm_gpt_v0.pt`. |
 | A4 · teacher REPL | same | `python -m agent.chat --arm teacher` | Structured policy. `compose()` is the voice. `:snap` `:arm` `:q` |
 | A5 · model REPL | same | `python -m agent.chat --arm model --backend torch --learn` | Trained head. `--learn` imitates the **teacher label**. Abstains if `p < 0.22`. |
+| A6 · Qwuack | same | `python -m qwuack.runtime --once` | Tenant cycle on the existing World. Fixture observation only. |
 
 Smoke without a REPL:
 
@@ -253,6 +264,7 @@ Smoke without a REPL:
 python -m agent.chat --arm teacher --once "What do you perceive?"
 python -m agent.chat --arm model --backend numpy --once "Probe the energy peak"
 python -m agent.chat --arm model --backend torch --once "Probe the energy peak"
+python -m qwuack.runtime --once
 ```
 
 `--ticks` is a **count** (offline synthetic warmup). Journal path is `--journal`. Do not pass a file to `--ticks`.
@@ -266,6 +278,7 @@ Power CYD CSI senders + bridge ESP32s so UDP reaches the host on **:4210**. Only
 | B1 · conductor | `~/projects/throne-room` | `python -m observer.startup --full` | Bridge :4210 → digest → torch HUD → Aurora (fail-closed). |
 | B2 · agent REPL | same | `python -m agent.chat --live --arm model --backend torch` | Chat as actuator on live CSI. Does **not** bind UDP. `:snap` `:drain` `:status` `:arm` `:q` |
 | B3 · follow | same | `python -m agent.chat --live --follow` | CSI/Aurora → FieldTick. No REPL. Watch the journal. |
+| B3b · Qwuack | same | `python -m qwuack.runtime --live --follow` | Duck-in-the-loop on the same journals. No UDP bind. |
 | B4 · snake | `wifi-sensing-system` firmware on CYDs | power + UDP :4210 | Physical organ. If this is quiet, B1 prints `csi_stale`. |
 | B5 · engine | `metafield-engine` | its own tests | Canonical World. Do not patch it from throne-room. |
 | B6 · ABI / SELF | `metafield-operator-abi` / `self-state-kernel` | their tests | Contracts. `agent/` here is the adapter. |
@@ -277,9 +290,10 @@ Journals (all under `/tmp/metafield/`):
 
 | File | Writer | Reader |
 |------|--------|--------|
-| `csi.jsonl` | bridge (B1) | HUD, agent `--live`, consumer |
-| `aurora_actions.jsonl` | aurora.action_layer | agent `--live`, HUD |
+| `csi.jsonl` | bridge (B1) | HUD, agent `--live`, consumer, Qwuack |
+| `aurora_actions.jsonl` | aurora.action_layer | agent `--live`, HUD, Qwuack |
 | `agent_ticks.jsonl` | agent loop | replay |
+| `qwuack_status.json` | qwuack.runtime | existing HUD / digest surfaces |
 | `arm_dec_v0.npz` | numpy train | `--backend numpy` |
 | `arm_gpt_v0.pt` | torch train | `--backend torch` / auto |
 | `arm_trajectories.jsonl` | `--live` agent | mix into the next train |
