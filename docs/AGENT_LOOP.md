@@ -64,6 +64,11 @@ They meet at `ActionProposal`. They do **not** collapse.
    `QUERY_FIELD` / `WAIT`. Capability-based. Default caps do **not** include
    `act.device`. A chat agent cannot fire the swarm by talking.
 
+Qwuack (`qwuack/`) is a tenant of this loop, not a third action plane.
+Identity + policy live in `qwuack/`. Authorization, commit, language
+machinery, and hardware stay where they already live. See
+[`qwuack/README.md`](../qwuack/README.md).
+
 `aurora.proposals.aurora_intent_to_proposal` wraps a policy Intent so SELF
 can observe it. `proposal_to_aurora_action` is a journal view, not a fire.
 
@@ -86,9 +91,14 @@ can observe it. `proposal_to_aurora_action` is a journal view, not a fire.
 ```bash
 # invariants (no hardware)
 python -m agent.test_invariants
+python -m unittest tests.test_qwuack_identity tests.test_qwuack_policy \
+    tests.test_qwuack_runtime tests.test_qwuack_boundary
 
 # chat on synthetic field
 python -m agent.chat --once "What do you perceive?"
+
+# Qwuack tenant cycle (synthetic fixture)
+python -m qwuack.runtime --once
 
 # same loop, live CSI + Aurora journals (no second UDP bind)
 python -m agent.chat --live --once "What do you perceive?"
@@ -96,6 +106,7 @@ python -m agent.chat --live --once "What do you perceive?"
 # FieldTick follower next to the conductor
 python -m observer.startup --full
 python -m agent.chat --live --follow
+python -m qwuack.runtime --live --follow
 ```
 
 `--ticks N` is a synthetic warmup **count**. `--journal PATH` is the FieldTick JSONL.
@@ -120,7 +131,8 @@ observer.metafield_bridge ─────────────► metafield F
         │
         ├── visualization.torch_display     (spatial HUD)
         ├── aurora.action_layer             (policy, ESCAPE)
-        └── agent.loop                      (SELF + ABI + FieldTick)
+        ├── agent.loop                      (SELF + ABI + FieldTick)
+        └── qwuack.runtime                  (tenant identity + policy)
                     ▲
                     │ language PerceptionEvent
                  agent.chat
