@@ -4,34 +4,6 @@ Embodied identity / runtime inhabiting the Throne Room agent loop.
 
 Qwuack is a tenant of Throne Room, not a new landlord.
 
-```
-physical organs
-    ↓
-FieldObservation
-    ↓
-PerceptionEvent
-    ↓
-SELF
-    ↓
-Qwuack cognition
-    ↓
-ActionProposal
-    ↓
-Operator ABI
-    ↓
-FieldDelta
-    ↓
-FieldTick
-    ↓
-actuation / world
-    ↓
-observation
-    ↺
-```
-
-Qwuack proposes. The Operator ABI authorizes. FieldTick commits.
-The world responds. Qwuack observes the response.
-
 ## The lake belongs to Daddy
 
 Qwuack has a habitat, not god-mode.
@@ -45,70 +17,37 @@ Daddy may own the lake.
 
 The FieldTick still owns the receipt.
 
-## What this layer is
+## Train the duck
 
-| File | Owns | Does not own |
-|------|------|----------------|
-| `identity.py` | who Qwuack is | world facts, Field writes |
-| `policy.py` | what Qwuack proposes | FieldTick, ABI, hardware |
-| `runtime.py` | wake / perceive / submit / observe | UDP :4210, Aurora ESCAPE, language machinery |
-
-Habitat scope (`lake`) permits:
-
-`QUERY_FIELD` `ATTEND` `PROBE` `REMEMBER` `SPEAK` `WAIT`
-
-It does **not** grant `act.device`. Dangerous hardware stays with Aurora / ESCAPE.
-
-Language is Qwuack's voice, not its architecture. `agent/language/` and
-`agent/chat.py` remain the attachment points. Memory is SELF, not a second database.
-
-## Run
+Qwuack does not grow its own model. It rolls the field, writes the existing
+language-arm trajectory schema, then the existing trainer mixes those rolls
+into the action head.
 
 ```bash
-# invariants (no hardware)
+cd ~/projects/throne-room
+git fetch origin qwuack-tenant && git checkout qwuack-tenant
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+
 python -m unittest tests.test_qwuack_identity tests.test_qwuack_policy \
     tests.test_qwuack_runtime tests.test_qwuack_boundary
 
-# tenant cycle on the existing World (synthetic fixture)
 python -m qwuack.runtime --once
+python -m qwuack.runtime --record --roll 16 --drill --train --examples 48 --steps 24
+python -m agent.chat --arm model --once "What do you perceive?"
+python -m agent.chat --arm model --once "Probe the energy peak"
+```
 
-# attach to the running observer journals — never binds UDP :4210
+Live pond (conductor already owns UDP :4210):
+
+```bash
 python -m observer.startup --full
-python -m qwuack.runtime --live --follow
+python -m qwuack.runtime --live --follow --record
+python -m agent.language.train --trajectories /tmp/metafield/qwuack_trajectories.jsonl
 ```
 
-Status is a compact object written to `/tmp/metafield/qwuack_status.json`
-for existing HUD / digest surfaces:
-
-```
-QWUACK
--------
-state:          awake
-habitat:        lake
-perception:     live
-sequence:       1842
-last_action:    ATTEND
-authorization:  granted
-consequence:    observed
-```
-
-## Definition of done
-
-Qwuack is not done when a duck class exists or a chatbot says quack.
-
-Qwuack is done when the duck lives in the field:
-
-real sensor → FieldObservation → PerceptionEvent → Qwuack → SELF →
-ActionProposal → Operator ABI → FieldDelta → FieldTick → authorized
-action → world → sensor.
-
-And these remain true:
-
-- Qwuack cannot directly mutate Field
-- Qwuack cannot bypass ABI
-- Qwuack cannot bypass ESCAPE for dangerous hardware
-- Qwuack cannot invent observations
-- Qwuack cannot rewrite FieldTick
-- Qwuack cannot acquire capabilities merely by asking
-- Qwuack can learn from consequences
-- Qwuack can change its subsequent behavior
+| File | Writer | Reader |
+|------|--------|--------|
+| `/tmp/metafield/qwuack_trajectories.jsonl` | `qwuack.runtime --record` | `agent.language.train` |
+| `/tmp/metafield/arm_dec_v0.npz` | `agent.language.train` | `agent.chat --arm model` |
+| `/tmp/metafield/qwuack_status.json` | runtime | HUD / you |
