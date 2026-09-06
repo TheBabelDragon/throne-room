@@ -13,6 +13,8 @@ jobs:
           python-version: "3.11"
       - name: FieldTick / ABI / live-feed invariants
         run: python -m agent.test_invariants
+      - name: Qwuack tenant invariants
+        run: python -m unittest tests.test_qwuack_identity tests.test_qwuack_policy tests.test_qwuack_runtime tests.test_qwuack_boundary
       - name: Language arm harness
         run: python -m agent.language.harness --steps 8
       - name: Language arm train runtime
