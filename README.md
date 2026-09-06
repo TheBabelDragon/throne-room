@@ -96,11 +96,12 @@ python -m observer.startup --full
 | `torch_display` | Closed-loop HUD @ ~36 Hz (CSI · body map · dynamics · Aurora) |
 | `metafield_consumer` | FO → FieldMemory if MetaField found |
 | `aurora_action` | Policy intents + Redis escape (cautious) |
-| digest loop | health · field_pressure · host_guard every 2.5 s |
+| digest loop | health · field_pressure · host_guard · **SHARED_BODY export** |
 
 Paths:
 
 - Digest: `/tmp/metafield/obs_digest.json`
+- Shared bodies (Reverie / cross-feed): `/tmp/metafield/shared_bodies.json`
 - Actions: `/tmp/metafield/aurora_actions.jsonl`
 - Escape: Redis `aurora:control:escape`
 - Agent memory: `/tmp/metafield/agent_memory.jsonl`
@@ -131,7 +132,17 @@ python -m visualization.torch_display --file /tmp/metafield/csi.jsonl --hz 40 --
 python -m visualization.torch_display --no-head
 ```
 
-### 4. Stop
+### 4. Reverie / browser cross-feed
+
+Conductor already writes `SHARED_BODY_SET` each digest tick. Serve it for the browser:
+
+```bash
+python -m observer.shared_body_server   # http://127.0.0.1:8765/shared_bodies.json
+```
+
+Reverie polls that URL and maps `body_id` → obstruction bodies (no synthetic `disturbance_*` when live data is present). Contract: [docs/SHARED_BODY.md](docs/SHARED_BODY.md).
+
+### 5. Stop
 
 `Ctrl+C` on the conductor — all children terminate cleanly.
 
@@ -192,6 +203,7 @@ python run.py --udp
 | [docs/SNAKE_PATH.md](docs/SNAKE_PATH.md) | CYD → host |
 | [docs/METAFIELD_OBS_PATH.md](docs/METAFIELD_OBS_PATH.md) | CSI → memory |
 | [docs/AURORA_ACTION.md](docs/AURORA_ACTION.md) | Action layer + escape |
+| [docs/SHARED_BODY.md](docs/SHARED_BODY.md) | Cross-feed body IDs · Reverie · Field Bus |
 | [docs/EXTRACTION_TRIBSTRUCT.md](docs/EXTRACTION_TRIBSTRUCT.md) | Cube/ensemble patterns |
 
 Synthetic fixtures: `dev/` only — not operational. `agent/` synthetic CSI is a **loop fixture** so the ABI can be tested without the snake.
