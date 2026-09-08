@@ -16,6 +16,7 @@ The protocol does not require an AI model. Replay must not query one.
 | Influence | untrusted | `qwuack.policy`, language arm, Aurora intents, chat, sensors |
 | Duck | authoritative | `agent.operator_abi` + `qwuack.gate` |
 | State | deterministic | `agent.engine.FieldScheduler` |
+| Display | witness | `duck_gate.eink` |
 
 ## v0.1 rules
 
@@ -27,6 +28,7 @@ The protocol does not require an AI model. Replay must not query one.
 6. Confidence and rationale are not authority.
 7. Gate config is versioned (`duck_gate_v0.1`).
 8. QwuackState is a tenant snapshot. It is not a write handle.
+9. E-ink renders after commit. It does not admit.
 
 Statuses: `ADMITTED REJECTED EXPIRED STALE SUPERSEDED CONFLICTED BUDGET_EXCEEDED UNAUTHORIZED INVALID INVARIANT_VIOLATION` plus `BOUNDS` for domain errors.
 
@@ -42,3 +44,23 @@ python -m qwuack.runtime --live --follow   # sibling of the conductor
 
 QwuackState path: `/tmp/metafield/qwuack_state.json`.
 Digest reads it when present.
+
+## E-ink observer
+
+Duck Gate owns truth. The panel only renders an admitted snapshot of that truth.
+
+```
+admit → commit FieldTick → emit GateEvent → EInkSink → framebuffer
+```
+
+The display never validates a proposal. ACK means
+"I physically observed this committed state," not "I approve it."
+
+```bash
+python -m duck_gate.eink --sequence 1842 --deltas 3
+python -m duck_gate.eink --status HALTED --reason "INVALID DELTA"
+```
+
+Software frame: `/tmp/metafield/eink_frame.txt`.
+Hardware SPI/I²C implements the same `render` / `refresh` port.
+`python -m observer.startup --full` does not drive the panel.
