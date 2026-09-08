@@ -205,6 +205,10 @@ class ActionProposal:
     originating_observation: str
     agent_id: str
     capability: str
+    observation_sequence: int | None = None
+    ttl: int | None = None
+    source_kind: str = "agent"
+    priority: float = 0.5
     schema: str = SCHEMA["proposal"]
     version: int = SCHEMA_VERSION
 
