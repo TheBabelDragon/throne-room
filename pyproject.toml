@@ -24,10 +24,11 @@ throne-arm = "agent.language.harness:main"
 throne-arm-train = "agent.language.train:main"
 throne-arm-torch = "agent.language.torch_train:main"
 throne-qwuack = "qwuack.runtime:main"
+throne-eink = "duck_gate.eink.__main__:main"
 
 [build-system]
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["observer*", "visualization*", "aurora*", "agent*", "qwuack*"]
+include = ["observer*", "visualization*", "aurora*", "agent*", "qwuack*", "duck_gate*"]

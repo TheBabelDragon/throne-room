@@ -14,7 +14,7 @@ jobs:
       - name: FieldTick / ABI / live-feed invariants
         run: python -m agent.test_invariants
       - name: Qwuack tenant invariants
-        run: python -m unittest tests.test_qwuack_identity tests.test_qwuack_policy tests.test_qwuack_runtime tests.test_qwuack_boundary tests.test_qwuack_state tests.test_duck_gate
+        run: python -m unittest tests.test_qwuack_identity tests.test_qwuack_policy tests.test_qwuack_runtime tests.test_qwuack_boundary tests.test_qwuack_state tests.test_duck_gate tests.test_eink_sink
       - name: Startup --full path check
         run: python -m unittest tests.test_startup_full_paths
       - name: Language arm harness
