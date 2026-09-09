@@ -1,6 +1,6 @@
 """python -m qwuack --runtime [--desk field|math]
 
---runtime means stay up. --once is the only polite exit.
+--runtime stays up. --once exits after one batch.
 """
 
 from __future__ import annotations
@@ -29,13 +29,12 @@ def _forward() -> int:
     cycles = int(_flag(argv, "--cycles", "3") or "3")
 
     if desk == "math":
-        from qwuack.desk import MathDesk, render_desk, write_desk
+        from qwuack.desk import MathDesk
 
         desk_obj = MathDesk.load()
         if once:
             results = desk_obj.session(cycles=max(1, cycles))
-            write_desk(results, generation=desk_obj.generation)
-            print(render_desk(results, desk_obj), flush=True)
+            desk_obj.persist(results)
             return 0
         return desk_obj.run_forever(interval=max(0.25, interval))
 

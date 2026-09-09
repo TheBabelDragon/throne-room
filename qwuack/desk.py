@@ -1,6 +1,8 @@
-"""Qwuack's theorem desk.
+"""Qwuack theorem desk — finite claims, recoverable artifacts.
 
-Finite claims only. --runtime keeps the Duck at the table until killed.
+Human log is one line per claim.
+Machine log is append-only JSONL.
+State file is enough to resume after sleep or crash.
 """
 
 from __future__ import annotations
@@ -9,63 +11,92 @@ import json
 import math
 import time
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 
-DESK_STATUS = Path("/tmp/metafield/qwuack_desk.json")
-MEMORY_PATH = Path("/tmp/metafield/qwuack_memory.jsonl")
-STATE_PATH = Path("/tmp/metafield/qwuack_desk_state.json")
+DESK_DIR = Path("/tmp/metafield")
+DESK_STATUS = DESK_DIR / "qwuack_desk.json"
+MEMORY_PATH = DESK_DIR / "qwuack_memory.jsonl"
+STATE_PATH = DESK_DIR / "qwuack_desk_state.json"
+LATEST_PATH = DESK_DIR / "qwuack_desk_latest.txt"
+
+
+def utcnow() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def collatz_next(n: int) -> int:
     return n // 2 if n % 2 == 0 else 3 * n + 1
 
 
-def reaches_one(n: int, cap: int = 2_000_000) -> bool:
+def reaches_one(n: int, cap: int = 2_000_000) -> tuple[bool, int]:
     x = n
-    for _ in range(cap):
-        if x == 1:
-            return True
-        x = collatz_next(x)
-    return False
-
-
-def stopping_time(n: int) -> int:
     steps = 0
-    x = n
-    while x != 1 and steps < 2_000_000:
+    while x != 1 and steps < cap:
         x = collatz_next(x)
         steps += 1
-    return steps
+    return x == 1, steps
+
+
+def max_stopping(lo: int, hi: int) -> tuple[int, int]:
+    worst_n = lo
+    worst_st = 0
+    for n in range(lo, hi + 1):
+        ok, st = reaches_one(n)
+        if not ok:
+            return n, -1
+        if st > worst_st:
+            worst_n, worst_st = n, st
+    return worst_n, worst_st
 
 
 @dataclass
 class ClaimResult:
     name: str
     statement: str
+    status: str
     experiment_ok: bool
     checker_ok: bool
     attacks_landed: int
-    status: str
+    horizon: int
+    elapsed_s: float
     notes: list[str] = field(default_factory=list)
+    evidence: dict[str, Any] = field(default_factory=dict)
 
     @property
     def admitted(self) -> bool:
         return self.status == "ADMITTED"
 
+    def line(self, ts: str, gen: int) -> str:
+        return (
+            f"{ts}  gen={gen:<4}  {self.status:<8}  {self.name:<24}  "
+            f"{self.statement}  {self.notes[-1] if self.notes else ''}"
+        ).rstrip()
+
 
 class MathDesk:
-    hunt = "global termination of 3n+1"
+    hunt = "named-range Collatz termination and least log bound"
     max_horizon = 20_000
 
-    def __init__(self, horizon: int = 400, bound_a: float = 40.0, bound_b: float = 12.0, generation: int = 0) -> None:
+    def __init__(
+        self,
+        horizon: int = 400,
+        bound_a: float = 40.0,
+        bound_b: float = 12.0,
+        generation: int = 0,
+        window_start: int = 20_001,
+    ) -> None:
         self.horizon = horizon
         self.bound_a = bound_a
         self.bound_b = bound_b
         self.generation = generation
+        self.window_start = window_start
         self.admitted_total = 0
         self.killed_total = 0
+        self.last_worst_n = 1
+        self.last_worst_st = 0
 
     @classmethod
     def load(cls, path: Path = STATE_PATH) -> "MathDesk":
@@ -77,9 +108,12 @@ class MathDesk:
                     bound_a=float(data.get("bound_a", 40.0)),
                     bound_b=float(data.get("bound_b", 12.0)),
                     generation=int(data.get("generation", 0)),
+                    window_start=int(data.get("window_start", 20_001)),
                 )
                 desk.admitted_total = int(data.get("admitted_total", 0))
                 desk.killed_total = int(data.get("killed_total", 0))
+                desk.last_worst_n = int(data.get("last_worst_n", 1))
+                desk.last_worst_st = int(data.get("last_worst_st", 0))
                 return desk
             except (OSError, ValueError, TypeError):
                 pass
@@ -92,76 +126,109 @@ class MathDesk:
             "bound_a": self.bound_a,
             "bound_b": self.bound_b,
             "generation": self.generation,
+            "window_start": self.window_start,
             "admitted_total": self.admitted_total,
             "killed_total": self.killed_total,
+            "last_worst_n": self.last_worst_n,
+            "last_worst_st": self.last_worst_st,
+            "updated": utcnow(),
         }, indent=2), encoding="utf-8")
 
-    def conjectures(self) -> list[dict[str, Any]]:
-        N = self.horizon
+    def _range_claim(self, lo: int, hi: int) -> ClaimResult:
+        t0 = time.perf_counter()
+        worst_n, worst_st = max_stopping(lo, hi)
+        elapsed = time.perf_counter() - t0
+        if worst_st < 0:
+            return ClaimResult(
+                name="all_reach_one",
+                statement=f"every n in {lo}..{hi} reaches 1",
+                status="KILLED",
+                experiment_ok=False,
+                checker_ok=False,
+                attacks_landed=1,
+                horizon=hi,
+                elapsed_s=elapsed,
+                notes=[f"failed at n={worst_n}"],
+                evidence={"lo": lo, "hi": hi, "failed_at": worst_n},
+            )
+        self.last_worst_n, self.last_worst_st = worst_n, worst_st
+        return ClaimResult(
+            name="all_reach_one",
+            statement=f"every n in {lo}..{hi} reaches 1",
+            status="ADMITTED",
+            experiment_ok=True,
+            checker_ok=True,
+            attacks_landed=0,
+            horizon=hi,
+            elapsed_s=elapsed,
+            notes=[f"worst n={worst_n} stopping={worst_st}"],
+            evidence={"lo": lo, "hi": hi, "worst_n": worst_n, "worst_stopping": worst_st},
+        )
+
+    def _bound_claim(self, lo: int, hi: int) -> ClaimResult:
+        t0 = time.perf_counter()
+        notes: list[str] = []
+        for n in range(lo, hi + 1):
+            ok, st = reaches_one(n)
+            cap = self.bound_a + self.bound_b * math.log2(max(n, 2))
+            if not ok or st >= cap:
+                elapsed = time.perf_counter() - t0
+                return ClaimResult(
+                    name="stopping_log_bound",
+                    statement=f"st(n) < {self.bound_a:g} + {self.bound_b:g}*log2(n) for n={lo}..{hi}",
+                    status="KILLED",
+                    experiment_ok=False,
+                    checker_ok=False,
+                    attacks_landed=0,
+                    horizon=hi,
+                    elapsed_s=elapsed,
+                    notes=[f"broke at n={n} st={st} cap={cap:.1f}"],
+                    evidence={"n": n, "stopping": st, "cap": cap, "a": self.bound_a, "b": self.bound_b},
+                )
+        elapsed = time.perf_counter() - t0
+        return ClaimResult(
+            name="stopping_log_bound",
+            statement=f"st(n) < {self.bound_a:g} + {self.bound_b:g}*log2(n) for n={lo}..{hi}",
+            status="ADMITTED",
+            experiment_ok=True,
+            checker_ok=True,
+            attacks_landed=0,
+            horizon=hi,
+            elapsed_s=elapsed,
+            notes=["bound held on named range"],
+            evidence={"lo": lo, "hi": hi, "a": self.bound_a, "b": self.bound_b},
+        )
+
+    def _unbounded_claim(self) -> ClaimResult:
+        return ClaimResult(
+            name="overclaim_all_integers",
+            statement="every positive integer reaches 1",
+            status="KILLED",
+            experiment_ok=False,
+            checker_ok=False,
+            attacks_landed=1,
+            horizon=self.horizon,
+            elapsed_s=0.0,
+            notes=["unbounded prize sentence is not an experiment"],
+            evidence={"reason": "no named bound"},
+        )
+
+    def next_work(self) -> list[ClaimResult]:
+        if self.horizon < self.max_horizon:
+            lo, hi = 1, self.horizon
+        else:
+            width = 500
+            lo = self.window_start
+            hi = lo + width - 1
+            self.window_start = hi + 1
         return [
-            {"name": "all_reach_one", "statement": f"every n in 1..{N} reaches 1 under Collatz", "kind": "range", "N": N},
-            {"name": "stopping_log_bound", "statement": f"stopping time of n\u2264{N} is < {self.bound_a:g} + {self.bound_b:g} log2(n)", "kind": "bound", "N": N, "a": self.bound_a, "b": self.bound_b},
-            {"name": "overclaim_all_integers", "statement": "every positive integer reaches 1", "kind": "unbounded"},
+            self._range_claim(lo, hi),
+            self._bound_claim(lo, hi),
+            self._unbounded_claim(),
         ]
 
-    def run_one(self, spec: dict[str, Any]) -> ClaimResult:
-        notes: list[str] = []
-        if spec["kind"] == "unbounded":
-            return ClaimResult(spec["name"], spec["statement"], False, False, 1, "KILLED", ["unbounded prize sentence is not an experiment"])
-
-        N = int(spec["N"])
-        experiment_ok = True
-        if spec["kind"] == "range":
-            for n in range(1, N + 1):
-                if not reaches_one(n):
-                    experiment_ok = False
-                    notes.append(f"failed at {n}")
-                    break
-            if experiment_ok:
-                notes.append(f"1..{N} reached 1")
-        elif spec["kind"] == "bound":
-            a, b = float(spec["a"]), float(spec["b"])
-            for n in range(1, N + 1):
-                st = stopping_time(n)
-                cap = a + b * math.log2(max(n, 2))
-                if st >= cap:
-                    experiment_ok = False
-                    notes.append(f"bound failed at n={n} st={st} cap={cap:.1f}")
-                    break
-            if experiment_ok:
-                notes.append("log bound held on named range")
-
-        if not experiment_ok:
-            return ClaimResult(spec["name"], spec["statement"], False, False, 0, "KILLED", notes)
-
-        checker_ok = True
-        for n in range(1, N + 1):
-            if spec["kind"] == "range" and not reaches_one(n):
-                checker_ok = False
-                notes.append(f"checker failed at {n}")
-                break
-            if spec["kind"] == "bound":
-                cap = float(spec["a"]) + float(spec["b"]) * math.log2(max(n, 2))
-                if stopping_time(n) >= cap:
-                    checker_ok = False
-                    notes.append(f"checker bound failed at {n}")
-                    break
-        if not checker_ok:
-            return ClaimResult(spec["name"], spec["statement"], True, False, 0, "KILLED", notes)
-
-        attacks_landed = 0
-        for n in list(range(1, N + 1, max(1, N // 20))) + [N]:
-            if not reaches_one(n):
-                attacks_landed += 1
-                notes.append(f"attack hit at {n}")
-                break
-        status = "ADMITTED" if attacks_landed == 0 else "KILLED"
-        if status == "ADMITTED":
-            notes.append("checker passed; attacks missed")
-        return ClaimResult(spec["name"], spec["statement"], True, checker_ok, attacks_landed, status, notes)
-
     def learn(self, result: ClaimResult) -> None:
-        if result.name == "all_reach_one" and result.admitted:
+        if result.name == "all_reach_one" and result.admitted and self.horizon < self.max_horizon:
             self.horizon = min(self.max_horizon, max(self.horizon + 200, int(self.horizon * 1.25)))
         if result.name == "stopping_log_bound" and not result.admitted:
             self.bound_a += 20.0
@@ -170,83 +237,69 @@ class MathDesk:
             self.bound_b = max(8.0, self.bound_b - 0.25)
 
     def session(self, cycles: int = 3) -> list[ClaimResult]:
-        catalog = self.conjectures()
-        out: list[ClaimResult] = []
-        for i in range(max(1, cycles)):
-            result = self.run_one(catalog[i % len(catalog)])
+        results = self.next_work()[: max(1, cycles)]
+        for result in results:
             self.learn(result)
             if result.admitted:
                 self.admitted_total += 1
             else:
                 self.killed_total += 1
-            out.append(result)
         self.generation += 1
         self.save()
-        return out
+        return results
+
+    def persist(self, results: list[ClaimResult]) -> None:
+        DESK_DIR.mkdir(parents=True, exist_ok=True)
+        ts = utcnow()
+        snapshot = {
+            "schema": "throne.qwuack.desk",
+            "ts": ts,
+            "body": "collatz",
+            "hunt": self.hunt,
+            "generation": self.generation,
+            "horizon": self.horizon,
+            "window_start": self.window_start,
+            "bound": {"a": self.bound_a, "b": self.bound_b},
+            "admitted_batch": sum(1 for r in results if r.admitted),
+            "killed_batch": sum(1 for r in results if not r.admitted),
+            "admitted_total": self.admitted_total,
+            "killed_total": self.killed_total,
+            "worst": {"n": self.last_worst_n, "stopping": self.last_worst_st},
+            "claims": [asdict(r) for r in results],
+            "journal": str(MEMORY_PATH),
+            "state": str(STATE_PATH),
+            "running": True,
+        }
+        DESK_STATUS.write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
+        with MEMORY_PATH.open("a", encoding="utf-8") as fh:
+            for r in results:
+                row = asdict(r)
+                row["ts"] = ts
+                row["generation"] = self.generation
+                fh.write(json.dumps(row) + "\n")
+        lines = [r.line(ts, self.generation) for r in results]
+        footer = (
+            f"{ts}  gen={self.generation:<4}  TOTALS    admitted={self.admitted_total}  "
+            f"killed={self.killed_total}  horizon={self.horizon}  "
+            f"window={self.window_start}  state={STATE_PATH}"
+        )
+        text = "\n".join(lines + [footer, ""])
+        LATEST_PATH.write_text(text, encoding="utf-8")
+        print(text, end="", flush=True)
 
     def run_forever(self, interval: float = 5.0) -> int:
         print(
-            f"QWUACK DESK  continuous  horizon={self.horizon}  "
-            f"bound={self.bound_a:g}+{self.bound_b:g}log2  interval={interval}s",
+            f"{utcnow()}  QWUACK DESK start  horizon={self.horizon}  "
+            f"bound={self.bound_a:g}+{self.bound_b:g}*log2  interval={interval}s  "
+            f"journal={MEMORY_PATH}",
             flush=True,
         )
         try:
             while True:
                 results = self.session(cycles=3)
-                write_desk(results, generation=self.generation, desk=self)
-                print(render_desk(results, self), flush=True)
+                self.persist(results)
                 time.sleep(interval)
         except KeyboardInterrupt:
             self.save()
-            print("[qwuack] desk halt", flush=True)
+            print(f"{utcnow()}  QWUACK DESK halt  gen={self.generation}", flush=True)
             return 0
-
-
-def write_desk(results: list[ClaimResult], generation: int = 0, desk: MathDesk | None = None, path: Path = DESK_STATUS) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "schema": "throne.qwuack.desk",
-        "body": "collatz",
-        "hunt": MathDesk.hunt,
-        "generation": generation,
-        "horizon": desk.horizon if desk else None,
-        "admitted": sum(1 for r in results if r.admitted),
-        "killed": sum(1 for r in results if not r.admitted),
-        "admitted_total": desk.admitted_total if desk else None,
-        "killed_total": desk.killed_total if desk else None,
-        "claims": [asdict(r) for r in results],
-        "running": True,
-    }
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    try:
-        MEMORY_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with MEMORY_PATH.open("a", encoding="utf-8") as fh:
-            for r in results:
-                row = asdict(r)
-                row["generation"] = generation
-                fh.write(json.dumps(row) + "\n")
-    except OSError:
-        pass
-
-
-def render_desk(results: list[ClaimResult], desk: MathDesk | None = None) -> str:
-    gen = desk.generation if desk else 0
-    hor = desk.horizon if desk else "?"
-    lines = [
-        "QWUACK DESK",
-        "-----------",
-        "body:     collatz",
-        f"gen:      {gen}",
-        f"horizon:  {hor}",
-        f"hunt:     {MathDesk.hunt}",
-        f"admitted: {sum(1 for r in results if r.admitted)}",
-        f"killed:   {sum(1 for r in results if not r.admitted)}",
-        "",
-    ]
-    for r in results:
-        flag = "ADMITTED" if r.admitted else "KILLED  "
-        lines.append(f"  {flag}  {r.name}")
-        lines.append(f"           {r.statement}")
-        if r.notes:
-            lines.append(f"           {r.notes[-1]}")
-    return "\n".join(lines) + "\n"
