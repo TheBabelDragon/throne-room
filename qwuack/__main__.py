@@ -1,4 +1,4 @@
-"""python -m qwuack --runtime [--desk field|math]
+"""python -m qwuack --runtime [--desk field|math|millennium]
 
 --runtime stays up. --once exits after one batch.
 """
@@ -37,6 +37,17 @@ def _forward() -> int:
             desk_obj.persist(results)
             return 0
         return desk_obj.run_forever(interval=max(0.25, interval))
+
+    if desk in {"millennium", "prize", "lab"}:
+        from qwuack.millennium.lab import MillenniumLab
+
+        lab = MillenniumLab.load()
+        if once:
+            for _ in range(max(1, cycles)):
+                batch = lab.session()
+                lab.persist(batch)
+            return 0
+        return lab.run_forever(interval=max(0.25, interval))
 
     from qwuack.runtime import main
     return main(argv)

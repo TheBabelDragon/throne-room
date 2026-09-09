@@ -10,6 +10,7 @@ import os
 import time
 
 from qwuack.desk import DESK_DIR, MathDesk, utcnow
+from qwuack.millennium.lab import MillenniumLab
 from qwuack.pnp import PNPDesk
 
 PID_PATH = DESK_DIR / "qwuack_desk.pid"
@@ -19,7 +20,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Start Qwuack desks and keep them up.")
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--interval", type=float, default=5.0)
-    parser.add_argument("--body", choices=("collatz", "pnp", "all"), default="all")
+    parser.add_argument(
+        "--body",
+        choices=("collatz", "pnp", "millennium", "all"),
+        default="all",
+    )
     args = parser.parse_args(argv)
 
     DESK_DIR.mkdir(parents=True, exist_ok=True)
@@ -28,15 +33,19 @@ def main(argv: list[str] | None = None) -> int:
 
     collatz = MathDesk.load()
     pnp = PNPDesk.load()
+    lab = MillenniumLab.load()
     interval = max(0.25, args.interval)
 
     def one_turn(which: str) -> None:
         if which == "collatz":
             results = collatz.session(cycles=2)
             collatz.persist(results)
-        else:
+        elif which == "pnp":
             claims = pnp.session()
             pnp.persist(claims)
+        else:
+            batch = lab.session()
+            lab.persist(batch)
 
     try:
         if args.body in {"pnp", "all"} and not pnp.rejected_prize:
@@ -44,25 +53,33 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{utcnow()} REJECTED P!=NP reason=unbounded_not_an_experiment", flush=True)
             pnp.rejected_prize = True
             pnp.save()
+        if args.body in {"millennium", "all"}:
+            print(
+                f"{utcnow()} MILLENNIUM rule=progress_not_victory "
+                "proof_killer=on victory=illegal",
+                flush=True,
+            )
         if args.once:
-            if args.body in {"collatz", "all"}:
-                one_turn("collatz")
-            if args.body in {"pnp", "all"}:
-                one_turn("pnp")
+            if args.body == "all":
+                one_turn("millennium")
+            else:
+                one_turn(args.body)
             return 0
         turn = 0
+        order = {
+            "collatz": ("collatz",),
+            "pnp": ("pnp",),
+            "millennium": ("millennium",),
+            "all": ("millennium", "pnp", "collatz"),
+        }[args.body]
         while True:
-            if args.body == "collatz":
-                one_turn("collatz")
-            elif args.body == "pnp":
-                one_turn("pnp")
-            else:
-                one_turn("pnp" if turn % 2 == 0 else "collatz")
-                turn += 1
+            one_turn(order[turn % len(order)])
+            turn += 1
             time.sleep(interval)
     except KeyboardInterrupt:
         collatz.save()
         pnp.save()
+        lab.state.save()
         print(f"{utcnow()} QWUACK halt", flush=True)
         return 0
     finally:
