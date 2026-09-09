@@ -9,35 +9,23 @@ Two faces, one repo:
 
 They meet at shared schemas. They do not collapse. Aurora stays fail-closed. The agent never mutates FieldTick. `act.device` is not a default capability.
 
+See [docs/AGENT_LOOP.md](docs/AGENT_LOOP.md) for the contract.
+
 Qwuack is the embodied tenant of that loop — habitat `lake`, not god-mode.
-Millennium Lab is the Duck's long-term desk: seven prize ponds plus Collatz,
-progress scored, victory illegal. See [docs/MILLENNIUM.md](docs/MILLENNIUM.md).
+`python -m qwuack.runtime` attaches to the existing World / observer journals
+and never binds UDP :4210. See [qwuack/README.md](qwuack/README.md).
+
+Millennium Lab is the Duck's long-term desk. Each Clay problem is an
+adversarial pond. Progress is scored. Victory is illegal.
 
 ```bash
 python -m qwuack.millennium --once
-python -m qwuack.startup --body millennium --once
-python -m unittest tests.test_millennium_lab tests.test_qwuack_desk
+python -m qwuack.startup --body millennium
+python -m unittest tests.test_millennium_lab
 ```
 
-Full operator walkthrough remains below.
+Contract: [docs/MILLENNIUM.md](docs/MILLENNIUM.md).
 
----
-
-See [docs/AGENT_LOOP.md](docs/AGENT_LOOP.md) for the contract and [qwuack/README.md](qwuack/README.md) for the tenant.
-
-## Docs
-
-| Doc | Content |
-|-----|---------|
-| [qwuack/README.md](qwuack/README.md) | Qwuack tenant — habitat, capabilities, closed loop |
-| [docs/MILLENNIUM.md](docs/MILLENNIUM.md) | Duck Millennium Lab — adversarial ponds, proof-killer |
-| [docs/QWUACK.md](docs/QWUACK.md) | How to start the Duck |
-| [docs/LANGUAGE_ARM.md](docs/LANGUAGE_ARM.md) | Local language arm protocol · tokenizer · trajectories |
-| [docs/CONTROL.md](docs/CONTROL.md) | Conductor + Aurora |
-| [docs/MEASUREMENT.md](docs/MEASUREMENT.md) | Fine windows |
-| [docs/SNAKE_PATH.md](docs/SNAKE_PATH.md) | CYD → host |
-| [docs/METAFIELD_OBS_PATH.md](docs/METAFIELD_OBS_PATH.md) | CSI → memory |
-| [docs/AURORA_ACTION.md](docs/AURORA_ACTION.md) | Action layer + escape |
-| [docs/EXTRACTION_TRIBSTRUCT.md](docs/EXTRACTION_TRIBSTRUCT.md) | Cube/ensemble patterns |
-
-The rest of the live-observer / language-arm walkthrough is unchanged on `main` history; this patch only adds the Lab to the front door so the Duck's seven ponds are findable.
+The live-observer walkthrough, language-arm desk, measurement defaults,
+and sibling-repo table are unchanged from `main`. Keep using
+`python -m observer.startup --full` for the CSI conductor.
