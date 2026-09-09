@@ -17,37 +17,34 @@ Daddy may own the lake.
 
 The FieldTick still owns the receipt.
 
-## Train the duck
-
-Qwuack does not grow its own model. It rolls the field, writes the existing
-language-arm trajectory schema, then the existing trainer mixes those rolls
-into the action head.
+## Start the Duck
 
 ```bash
-cd ~/projects/throne-room
-git fetch origin qwuack-tenant && git checkout qwuack-tenant
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-
-python -m unittest tests.test_qwuack_identity tests.test_qwuack_policy \
-    tests.test_qwuack_runtime tests.test_qwuack_boundary
-
+python -m qwuack --runtime
+python -m qwuack --runtime --desk math
 python -m qwuack.runtime --once
-python -m qwuack.runtime --record --roll 16 --drill --train --examples 48 --steps 24
-python -m agent.chat --arm model --once "What do you perceive?"
-python -m agent.chat --arm model --once "Probe the energy peak"
+python -m qwuack.runtime --live --follow
+python -m qwuack.runtime --desk math --cycles 3
 ```
 
-Live pond (conductor already owns UDP :4210):
+`--full` does not start this process. Run it as a sibling.
 
 ```bash
 python -m observer.startup --full
-python -m qwuack.runtime --live --follow --record
-python -m agent.language.train --trajectories /tmp/metafield/qwuack_trajectories.jsonl
+python -m qwuack.runtime --live --follow
 ```
 
 | File | Writer | Reader |
 |------|--------|--------|
-| `/tmp/metafield/qwuack_trajectories.jsonl` | `qwuack.runtime --record` | `agent.language.train` |
-| `/tmp/metafield/arm_dec_v0.npz` | `agent.language.train` | `agent.chat --arm model` |
-| `/tmp/metafield/qwuack_status.json` | runtime | HUD / you |
+| `/tmp/metafield/qwuack_status.json` | field runtime | HUD / digest |
+| `/tmp/metafield/qwuack_desk.json` | math desk | you |
+| `/tmp/metafield/qwuack_memory.jsonl` | math desk | next hypothesis |
+
+Tests:
+
+```bash
+python -m unittest tests.test_qwuack_identity tests.test_qwuack_policy \
+    tests.test_qwuack_runtime tests.test_qwuack_boundary tests.test_qwuack_desk
+```
+
+Longer contract: [`docs/QWUACK.md`](../docs/QWUACK.md).
