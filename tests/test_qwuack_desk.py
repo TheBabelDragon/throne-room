@@ -5,7 +5,6 @@ from __future__ import annotations
 import unittest
 
 from qwuack.desk import MathDesk
-from qwuack.runtime import main
 
 
 class DeskTests(unittest.TestCase):
@@ -22,9 +21,11 @@ class DeskTests(unittest.TestCase):
         self.assertEqual(result.status, "KILLED")
         self.assertFalse(result.experiment_ok)
 
-    def test_runtime_desk_math_cli(self) -> None:
-        code = main(["--runtime", "--desk", "math", "--cycles", "3"])
-        self.assertEqual(code, 0)
+    def test_session_mixes_admit_and_kill(self) -> None:
+        results = MathDesk().session(cycles=3)
+        self.assertEqual(len(results), 3)
+        self.assertTrue(any(r.admitted for r in results))
+        self.assertTrue(any(r.status == "KILLED" for r in results))
 
 
 if __name__ == "__main__":
