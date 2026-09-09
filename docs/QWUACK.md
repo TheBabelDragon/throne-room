@@ -1,41 +1,42 @@
 # Qwuack
 
-Tenant of Throne Room. Not a landlord. Not a Millennium solver.
-
-`--runtime` means stay up. `--once` is the only polite exit.
-`--full` does **not** start Qwuack and does **not** give it UDP :4210.
-
 Stay on `main`.
 
-## Start the Duck
+`python -m observer.startup --full` starts the CSI conductor.
+It does **not** start the Duck.
 
-Overnight math desk:
+This starts the Duck:
 
 ```bash
+cd ~/throne-room || cd ~/projects/throne-room
 git checkout main
 git pull --ff-only origin main
-python -m qwuack --runtime --desk math
+source .venv/bin/activate
+python -m qwuack.startup
 ```
 
-One batch, then exit:
+You should immediately see `QWUACK STARTUP` and a pid. If you do not,
+you are in the wrong repo or on `quack-tenant`.
+
+Leave it running. Ctrl+C writes state and stops.
+
+One batch:
 
 ```bash
-python -m qwuack --runtime --desk math --once
+python -m qwuack.startup --once
 ```
 
-Field tenant:
+Sleep:
 
 ```bash
-python -m qwuack --runtime
-python -m qwuack.runtime --live --follow
+mkdir -p /tmp/metafield
+nohup python -m qwuack.startup --interval 5 > /tmp/metafield/qwuack_desk.log 2>&1 &
 ```
 
-Leave the math desk running while you sleep. It grows the named Collatz
-horizon when a range claim survives, loosens a killed bound, and keeps
-killing the unbounded prize sentence. Ctrl+C writes state and stops.
+Recover:
 
-State:
-
-- `/tmp/metafield/qwuack_desk.json`
-- `/tmp/metafield/qwuack_desk_state.json`
-- `/tmp/metafield/qwuack_memory.jsonl`
+```bash
+cat /tmp/metafield/qwuack_desk.pid
+tail -20 /tmp/metafield/qwuack_desk.log
+tail -5 /tmp/metafield/qwuack_memory.jsonl
+```
