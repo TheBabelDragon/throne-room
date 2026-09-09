@@ -2,63 +2,40 @@
 
 Tenant of Throne Room. Not a landlord. Not a Millennium solver.
 
-```
-Qwuack proposes → Duck Gate admits → FieldTick commits → world answers
-```
-
+`--runtime` means stay up. `--once` is the only polite exit.
 `--full` does **not** start Qwuack and does **not** give it UDP :4210.
+
+Stay on `main`.
 
 ## Start the Duck
 
-Field tenant (CSI / Aurora journals):
+Overnight math desk:
+
+```bash
+git checkout main
+git pull --ff-only origin main
+python -m qwuack --runtime --desk math
+```
+
+One batch, then exit:
+
+```bash
+python -m qwuack --runtime --desk math --once
+```
+
+Field tenant:
 
 ```bash
 python -m qwuack --runtime
-python -m qwuack.runtime --once
 python -m qwuack.runtime --live --follow
 ```
 
-Theorem desk (finite claims only):
+Leave the math desk running while you sleep. It grows the named Collatz
+horizon when a range claim survives, loosens a killed bound, and keeps
+killing the unbounded prize sentence. Ctrl+C writes state and stops.
 
-```bash
-python -m qwuack --runtime --desk math
-python -m qwuack.runtime --desk math --cycles 3
-```
+State:
 
-## Desks
-
-| `--desk` | World | Surviving claim |
-|----------|--------|-----------------|
-| `field`  | CSI / Aurora tenant | an admitted field action |
-| `math`   | Collatz bound       | `every n in 1..N reaches 1` — N named |
-
-Unbounded sentences (`every integer reaches 1`, `RH is true`) are killed
-at the experiment gate. That is the point.
-
-## CLI that actually exists
-
-```
---runtime
---desk field|math
---cycles N
---live
---follow
---once
---ticks N
---csi PATH
---aurora PATH
---journal PATH
---interval SEC
-```
-
-There is no `--record`. There is no `--drill`. There is no `qwuack-tenant` branch required.
-
-## Files
-
-| Path | Writer |
-|------|--------|
-| `/tmp/metafield/qwuack_status.json` | field runtime |
-| `/tmp/metafield/qwuack_desk.json` | math desk |
-| `/tmp/metafield/qwuack_memory.jsonl` | admitted/killed claims |
-
-See also [`DUCK_GATE.md`](DUCK_GATE.md).
+- `/tmp/metafield/qwuack_desk.json`
+- `/tmp/metafield/qwuack_desk_state.json`
+- `/tmp/metafield/qwuack_memory.jsonl`
