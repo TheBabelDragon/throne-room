@@ -1,4 +1,4 @@
-"""python -m qwuack --runtime [--desk field|math|millennium]
+"""python -m qwuack --runtime [--desk field|math|millennium|workbench]
 
 --runtime stays up. --once exits after one batch.
 """
@@ -48,6 +48,18 @@ def _forward() -> int:
                 lab.persist(batch)
             return 0
         return lab.run_forever(interval=max(0.25, interval))
+
+    if desk in {"workbench", "proof", "duck"}:
+        from qwuack.workbench.desk import DuckDesk
+        from qwuack.workbench.registry import get_problem
+        from qwuack.workbench.store import ObjectStore
+
+        problem = _flag(argv, "--problem", "Riemann") or "Riemann"
+        bench = DuckDesk(get_problem(problem), store=ObjectStore())
+        if once:
+            bench.session(cycles=max(1, cycles))
+            return 0
+        return bench.run_forever(interval=max(0.25, interval))
 
     from qwuack.runtime import main
     return main(argv)

@@ -12,6 +12,9 @@ import time
 from qwuack.desk import DESK_DIR, MathDesk, utcnow
 from qwuack.millennium.lab import MillenniumLab
 from qwuack.pnp import PNPDesk
+from qwuack.workbench.desk import DuckDesk
+from qwuack.workbench.registry import get_problem
+from qwuack.workbench.store import ObjectStore
 
 PID_PATH = DESK_DIR / "qwuack_desk.pid"
 
@@ -22,9 +25,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--interval", type=float, default=5.0)
     parser.add_argument(
         "--body",
-        choices=("collatz", "pnp", "millennium", "all"),
+        choices=("collatz", "pnp", "millennium", "workbench", "all"),
         default="all",
     )
+    parser.add_argument("--problem", default="Riemann")
     args = parser.parse_args(argv)
 
     DESK_DIR.mkdir(parents=True, exist_ok=True)
@@ -34,6 +38,7 @@ def main(argv: list[str] | None = None) -> int:
     collatz = MathDesk.load()
     pnp = PNPDesk.load()
     lab = MillenniumLab.load()
+    bench = DuckDesk(get_problem(args.problem), store=ObjectStore())
     interval = max(0.25, args.interval)
 
     def one_turn(which: str) -> None:
@@ -43,6 +48,8 @@ def main(argv: list[str] | None = None) -> int:
         elif which == "pnp":
             claims = pnp.session()
             pnp.persist(claims)
+        elif which == "workbench":
+            bench.session(cycles=1)
         else:
             batch = lab.session()
             lab.persist(batch)
@@ -59,8 +66,15 @@ def main(argv: list[str] | None = None) -> int:
                 "proof_killer=on victory=illegal",
                 flush=True,
             )
+        if args.body in {"workbench", "all"}:
+            print(
+                f"{utcnow()} WORKBENCH problem={args.problem} "
+                "proof=typed_state victory=illegal",
+                flush=True,
+            )
         if args.once:
             if args.body == "all":
+                one_turn("workbench")
                 one_turn("millennium")
             else:
                 one_turn(args.body)
@@ -70,7 +84,8 @@ def main(argv: list[str] | None = None) -> int:
             "collatz": ("collatz",),
             "pnp": ("pnp",),
             "millennium": ("millennium",),
-            "all": ("millennium", "pnp", "collatz"),
+            "workbench": ("workbench",),
+            "all": ("workbench", "millennium", "pnp", "collatz"),
         }[args.body]
         while True:
             one_turn(order[turn % len(order)])

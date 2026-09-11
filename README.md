@@ -18,13 +18,18 @@ and never binds UDP :4210. See [qwuack/README.md](qwuack/README.md).
 Millennium Lab is the Duck's long-term desk. Each Clay problem is an
 adversarial pond. Progress is scored. Victory is illegal.
 
+The workbench is the typed upgrade of that desk: every object gets an
+ID, and a finite experiment cannot change clothes and call itself a proof.
+
 ```bash
 python -m qwuack.millennium --once
+python -m qwuack.workbench --problem Riemann --once
 python -m qwuack.startup --body millennium
-python -m unittest tests.test_millennium_lab
+python -m unittest tests.test_millennium_lab tests.test_duck_workbench
 ```
 
-Contract: [docs/MILLENNIUM.md](docs/MILLENNIUM.md).
+Contract: [docs/MILLENNIUM.md](docs/MILLENNIUM.md),
+[docs/WORKBENCH.md](docs/WORKBENCH.md).
 
 The live-observer walkthrough, language-arm desk, measurement defaults,
 and sibling-repo table are unchanged from `main`. Keep using
