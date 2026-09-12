@@ -55,6 +55,8 @@ class DuckDesk:
             "lemmas": len(self.store.lemmas(self.spec.id)),
             "equations": c.get("equation", 0),
             "experiments": c.get("experiment", 0),
+            "certificates": c.get("certificate", 0),
+            "legal_victories": sum(1 for o in self.store.of_problem(self.spec.id) if o.victory_legal),
         }
 
     def render(self) -> str:
@@ -72,7 +74,7 @@ class DuckDesk:
         target = targets[-1] if targets else None
         lines = [
             "DUCK DESK",
-            "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+            "\u2500" * 36,
             f"Problem: {spec.title}  [{spec.id}]",
             "Definitions",
         ]
@@ -110,16 +112,33 @@ class DuckDesk:
             f"{census['active_conjectures']} active conjectures, {census['lemmas']} lemmas"
         )
         lines.append(f"Status: {status}")
-        lines.append("RULE: proof is a typed state. Victory is illegal.")
+        legal = [o for o in store.of_problem(spec.id) if o.victory_legal]
+        if legal:
+            lines.append(f"Certificates: {', '.join(o.id for o in legal)}  VICTORY LEGAL")
+        else:
+            lines.append("Certificates: (none)")
+        lines.append("RULE: proof is a typed state. Victory is legal only by certificate.")
         return "\n".join(lines) + "\n"
 
     def snapshot(self) -> dict[str, Any]:
         census = self.census()
+        certificates = [
+            {
+                "id": o.id,
+                "victory_legal": o.victory_legal,
+                "reason": (o.evidence or {}).get("reason"),
+                "proof_id": (o.evidence or {}).get("proof_id"),
+            }
+            for o in self.store.of_problem(self.spec.id)
+            if o.kind == ObjectKind.CERTIFICATE
+        ]
         return {
             "schema": "throne.qwuack.workbench",
             "kind": "proof_workbench",
             "not_a_millennium_proof": True,
             "victory_legal": False,
+            "victory_rule": "legal_only_by_certificate",
+            "certificates": certificates,
             "problem": self.spec.as_dict(),
             "session": self.wb.session_id,
             "generation": self.wb.generation,
