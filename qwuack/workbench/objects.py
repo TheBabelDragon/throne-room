@@ -30,6 +30,7 @@ class ObjectKind(str, Enum):
     HYPOTHESIS = "hypothesis"
     KNOWN = "known"
     GOAL = "goal"
+    CERTIFICATE = "certificate"
 
 
 class ClaimStatus(str, Enum):
@@ -92,6 +93,17 @@ class MathObject:
         if self.verification.get("formal") != "PASS":
             return False
         return True
+
+    @property
+    def victory_legal(self) -> bool:
+        """True only on an admitted VictoryCertificate. Never a Duck mood."""
+        if self.kind != ObjectKind.CERTIFICATE:
+            return False
+        if self.status not in {ClaimStatus.FORMALLY_VERIFIED, ClaimStatus.PROOF}:
+            return False
+        if self.verification.get("formal") != "PASS":
+            return False
+        return bool((self.evidence or {}).get("victory_legal")) is True
 
     def as_dict(self) -> dict[str, Any]:
         row = asdict(self)

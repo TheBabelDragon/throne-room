@@ -28,6 +28,7 @@ PREFIX = {
     "known": "K",
     "goal": "G",
     "session": "S",
+    "certificate": "VC",
 }
 
 
