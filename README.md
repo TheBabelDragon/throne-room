@@ -16,16 +16,17 @@ Qwuack is the embodied tenant of that loop — habitat `lake`, not god-mode.
 and never binds UDP :4210. See [qwuack/README.md](qwuack/README.md).
 
 Millennium Lab is the Duck's long-term desk. Each Clay problem is an
-adversarial pond. Progress is scored. Victory is illegal.
+adversarial pond. Progress is scored. Prize speech is not victory.
 
 The workbench is the typed upgrade of that desk: every object gets an
-ID, and a finite experiment cannot change clothes and call itself a proof.
+ID, a finite experiment cannot change clothes and call itself a proof,
+and `victory_legal` is true only on an admitted VictoryCertificate.
 
 ```bash
 python -m qwuack.millennium --once
 python -m qwuack.workbench --problem Riemann --once
 python -m qwuack.startup --body millennium
-python -m unittest tests.test_millennium_lab tests.test_duck_workbench
+python -m unittest tests.test_millennium_lab tests.test_duck_workbench tests.test_victory_certificate
 ```
 
 Contract: [docs/MILLENNIUM.md](docs/MILLENNIUM.md),

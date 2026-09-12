@@ -12,7 +12,7 @@ from qwuack.workbench.store import ObjectStore
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Duck proof-workbench. Proof is a typed state. Victory is illegal.",
+        description="Duck proof-workbench. Proof is a typed state. Victory is legal only by certificate.",
     )
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--cycles", type=int, default=1)
