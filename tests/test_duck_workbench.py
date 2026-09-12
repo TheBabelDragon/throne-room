@@ -89,7 +89,7 @@ class DeskTests(unittest.TestCase):
         text = self.desk.render()
         self.assertIn("DUCK DESK", text)
         self.assertIn("MATH-MP-02", text)
-        self.assertIn("Victory is illegal", text)
+        self.assertIn("Victory is legal only by certificate.", text)
 
     def test_cannot_promote_window_to_prize_proof(self) -> None:
         self.desk.session(cycles=1)

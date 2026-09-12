@@ -47,6 +47,8 @@ connections between ponds.
 Every claimed breakthrough is thrown at the proof-killer before
 MetaField will accept it. Declaring a prize solved is a kill
 condition. Unbounded sentences are rejected once per pond and dropped.
+Lab journals stay `victory_legal: false`. A workbench
+VictoryCertificate is a separate typed admission, not a pond speech act.
 
 Duck Gate remains the scientific method. The seven problems are the
 Duck's seven biggest ponds. Poincaré is archival — CMI already
@@ -91,4 +93,6 @@ Journals under `/tmp/metafield/`:
 | `millennium_latest.txt` | one-line desk |
 
 Progress score weights lemmas, counterexamples, evidence, failed
-strategies, and connections. There is no victory term.
+strategies, and connections. There is no victory term in the
+progress score. Legal victory is a workbench certificate, not a
+lab generation counter.

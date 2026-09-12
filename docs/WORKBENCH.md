@@ -7,7 +7,7 @@ Every mathematical object gets an immutable ID.
 
 `MathProblem` `MathDefinition` `MathClaim` `MathEquation`
 `MathLemma` `MathProof` `MathCounterexample` `MathExperiment`
-`MathAttempt` `MathDependency` `MathResult`
+`MathAttempt` `MathDependency` `MathResult` `VictoryCertificate`
 
 ## Registry
 
@@ -32,6 +32,22 @@ A claim that uses a forbidden shortcut is stored. It is never a proof.
 `MathObject.is_proof` is true only when status is a proof-class
 state *and* `verification.formal == PASS`.
 
+## Victory is legal only by certificate
+
+The Duck does not acquire a global `victory_legal` flag.
+`VictoryCertificate` is a first-class object (`VC-####`).
+Admission is fail-closed in `qwuack.workbench.victory`:
+
+schema → problem identity → prize rules → `is_proof`
+      → dependency closure → checker blob → completion rule
+
+Desk snapshots keep `victory_legal: false` at the environment layer.
+Only an admitted certificate object may carry `victory_legal: true`.
+Poincaré cannot become a Duck victory. Finite experiments still
+cannot change clothes and call themselves a prize proof.
+
+See `docs/VICTORY.md`.
+
 ## Start
 
 ```bash
@@ -39,7 +55,7 @@ python -m qwuack.workbench --list
 python -m qwuack.workbench --problem Riemann --once
 python -m qwuack --desk workbench --problem MATH-MP-01 --once --cycles 2
 python -m qwuack.startup --body workbench --problem Collatz --once
-python -m unittest tests.test_duck_workbench
+python -m unittest tests.test_duck_workbench tests.test_victory_certificate
 ```
 
 Journals under `/tmp/metafield/`:
