@@ -12,6 +12,7 @@ from qwuack.workbench.equations import EquationEngine
 from qwuack.workbench.objects import ClaimStatus, MathObject, ObjectKind
 from qwuack.workbench.registry import ProblemSpec, shortcut_forbidden
 from qwuack.workbench.store import ObjectStore
+from qwuack.workbench.victory import admit_victory
 
 
 WorkerFn = Callable[["Workbench"], list[MathObject]]
@@ -254,6 +255,26 @@ class Workbench:
             notes=list(art.notes),
             evidence={"artifact": art.name, "pond": art.pond, **dict(art.evidence)},
             verification=ver,
+        )
+
+    def certify(
+        self,
+        proof_id: str,
+        *,
+        completion: str,
+        checker_blob: dict | None = None,
+        shortcut_tags: tuple[str, ...] = (),
+    ) -> MathObject:
+        """Propose a VictoryCertificate. Admission is fail-closed."""
+        return admit_victory(
+            self.store,
+            problem_id=self.spec.id,
+            proof_id=proof_id,
+            completion=completion,
+            checker_blob=checker_blob,
+            shortcut_tags=shortcut_tags,
+            session=self.session_id,
+            worker="victory",
         )
 
     def turn(self) -> list[MathObject]:
