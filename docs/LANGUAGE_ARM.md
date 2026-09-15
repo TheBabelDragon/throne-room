@@ -5,18 +5,18 @@ client with a system prompt. The model does not define the architecture.
 
 ```
 Aurora Participant
-        │
-        ▼
+        |
+        v
    SELF / State
-        │
-        ▼
+        |
+        v
  Language Arm
- tokenizer → action head → compose() voice → ActionProposal
-        │
-        ▼
+ tokenizer -> action head -> compose() voice -> ActionProposal
+        |
+        v
  Operator ABI
-        │
-        ▼
+        |
+        v
     MetaField / FieldTick
 ```
 
@@ -37,7 +37,7 @@ Teacher and model share that voice.
 
 ## Protocol first
 
-`LanguageContext` → `LanguageOutput` → `ActionProposal`
+`LanguageContext` -> `LanguageOutput` -> `ActionProposal`
 
 Also: `ConversationEvent`, `MemoryReference`, `ParticipantObservation`.
 
@@ -68,30 +68,39 @@ Two local runtimes. Same protocol. Same compose() voice.
 | Runtime | Command | Trains |
 |---------|---------|--------|
 | numpy (default) | `python -m agent.language.train` | action head on hashed n-grams. Decoder blocks stay genesis. No torch required. |
-| torch | `pip install torch` then `python -m agent.language.torch_train` | **transformer blocks**, user-span pooled embeddings → action, LM on composed `<PROPOSE><ACTION>body<EOS>` |
+| torch | `pip install torch` then `python -m agent.language.torch_train` | **transformer blocks**, user-span pooled embeddings -> action, LM on composed `<PROPOSE><ACTION>body<EOS>` |
 
-Hold-out action accuracy ≥ 0.5 is the gate. Best checkpoint is kept.
+Hold-out action accuracy >= 0.5 is the gate. Best checkpoint is kept.
 
 `compose()` remains the operator utterance. Field numbers are observed, not sampled. Torch generation is for the protocol sequence and trajectories.
 
 ```
-observation → LanguageContext → tokens/proposal → ABI → FieldTick → world_response
+observation -> LanguageContext -> tokens/proposal -> ABI -> FieldTick -> world_response
 ```
+
+## Action pathway (v1.1)
+
+Two ablatable pathways; default is **contextual**:
+
+| Path | Flow | Action gradients through attention? |
+|------|------|-------------------------------------|
+| `contextual` (default) | embed -> blocks -> LN -> pool USER span -> action/conf/value | Yes |
+| `pre_attention` (ablation) | embed -> pool USER span -> action | No |
+
+```bash
+python -m agent.language.torch_train --action-path contextual
+python -m agent.language.torch_train --action-path pre_attention
+python -m agent.language.torch_train --compare-paths --examples 64 --steps 16
+```
+
+Same dataset, seed, optimizer, and budget. Compare `hold_acc` before expanding the corpus.
 
 ## Run
 
-Torch is optional. Numpy stays the default. Install from the venv — do not
-pip-install the extras name from PyPI, and quote any `[...]` or the shell
-will eat it.
+Torch is optional. Numpy stays the default.
 
 ```bash
 pip install torch
-# CPU-only fallback if the default wheel fails:
-#   pip install typing-extensions jinja2 filelock sympy networkx
-#   pip install torch --index-url https://download.pytorch.org/whl/cpu
-# from the repo root, same extra:
-#   pip install -e ".[head-torch]"
-
 python -m agent.language.harness
 python -m agent.language.train --examples 64 --steps 40
 python -m agent.language.torch_train --examples 64 --steps 16
@@ -99,14 +108,15 @@ python -m agent.chat --arm teacher --once "What do you perceive?"
 python -m agent.chat --arm model --once "Probe the energy peak"
 python -m agent.chat --arm model --backend torch --learn
 ```
-`--backend auto` (default) prefers `/tmp/metafield/arm_gpt_v0.pt` when torch is installed.
+
+`--backend auto` (default) prefers `/tmp/metafield/arm_gpt_v1.pt` when torch is installed.
 
 REPL: `:snap` `:drain` `:status` `:arm` `:q`
 
 Checkpoints:
 
 - numpy: `/tmp/metafield/arm_dec_v0.npz` (`ARM_CHECKPOINT=`)
-- torch: `/tmp/metafield/arm_gpt_v0.pt` (`ARM_TORCH_CHECKPOINT=`)
+- torch: `/tmp/metafield/arm_gpt_v1.pt` (`ARM_TORCH_CHECKPOINT=`)
 
 Trajectories: `ARM_TRAJECTORIES=` (default `/tmp/metafield/arm_trajectories.jsonl`).
 
@@ -122,7 +132,7 @@ Trajectories: `ARM_TRAJECTORIES=` (default `/tmp/metafield/arm_trajectories.json
 8. Observe resulting FieldTicks
 9. Provenance + confidence on every proposal
 10. Replay the field interaction deterministically
-11. Fit an action head on engine trajectories until hold-out ≥ 0.5
+11. Fit an action head on engine trajectories until hold-out >= 0.5
 12. Abstain (WAIT) when the head is below threshold
 13. Online imitation (`--learn`) from the teacher label
 14. Torch decoder that actually trains attention (optional extra)
