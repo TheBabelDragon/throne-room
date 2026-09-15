@@ -1,9 +1,18 @@
 """Tiny decoder transformer. Local, numpy, no network.
 
-v1 trains an action head on user-span hashed char-ngrams (fastText) plus
-a weakly-scaled embedding bag, and a prefix LM head. Decoder blocks stay
-genesis here. The torch path (`python -m agent.language.torch_train`)
-is what actually backprops through attention.
+Action pathways (explicit, ablatable):
+
+  contextual (default):
+      tokens → embed+pos → decoder blocks → final LN
+        → pool user span on *hidden* → action head (d_model)
+
+  pre_attention (ablation / legacy v1):
+      user-span hashed char-ngrams (fastText) ⊕ weak embed-bag → action head
+      (does not route action gradients through attention)
+
+LM / prefix head still uses the decoder blocks. The torch path
+(`python -m agent.language.torch_train`) is what fully backprops action
+loss through attention when action_path=contextual.
 """
 
 from __future__ import annotations
@@ -14,7 +23,7 @@ import numpy as np
 
 from agent.language.tokenizer import BYTE_SIZE, SPECIALS
 
-MODEL_VERSION = "arm-dec-v1"
+MODEL_VERSION = "arm-dec-v1.1"
 ACTION_ORDER: tuple[str, ...] = (
     "SPEAK", "PROBE", "REMEMBER", "ATTEND", "SET_GOAL", "QUERY_FIELD", "WAIT",
 )
@@ -85,9 +94,12 @@ class DecoderTransformer:
         n_head: int = 4,
         max_seq: int = 192,
         seed: int = 7,
+        action_path: str = "contextual",
     ) -> None:
         if d_model % n_head != 0:
             raise ValueError("d_model must divide n_head")
+        if action_path not in ("contextual", "pre_attention"):
+            raise ValueError(f"unknown action_path: {action_path}")
         self.vocab_size = vocab_size
         self.d_model = d_model
         self.n_layer = n_layer
@@ -95,6 +107,7 @@ class DecoderTransformer:
         self.d_head = d_model // n_head
         self.max_seq = max_seq
         self.seed = seed
+        self.action_path = action_path
         self.version = MODEL_VERSION
         self.ngram_dim = NGRAM_DIM
         self.bag_scale = BAG_SCALE
@@ -122,6 +135,12 @@ class DecoderTransformer:
         self.head = rng.randn(d_model, vocab_size).astype(np.float32) * scale
         self.w_act = rng.randn(self.feat_dim, len(ACTION_ORDER)).astype(np.float32) * scale
         self.b_act = np.zeros(len(ACTION_ORDER), dtype=np.float32)
+        self.w_act_ctx = rng.randn(d_model, len(ACTION_ORDER)).astype(np.float32) * scale
+        self.b_act_ctx = np.zeros(len(ACTION_ORDER), dtype=np.float32)
+        self.w_conf = rng.randn(d_model, 1).astype(np.float32) * scale
+        self.b_conf = np.zeros(1, dtype=np.float32)
+        self.w_val = rng.randn(d_model, 1).astype(np.float32) * scale
+        self.b_val = np.zeros(1, dtype=np.float32)
 
     def forward(self, ids: list[int], *, return_hidden: bool = False):
         if not ids:
@@ -165,20 +184,65 @@ class DecoderTransformer:
         return h / n, h, n
 
     def action_features(self, ids: list[int]) -> np.ndarray:
+        """Legacy pre-attention features: embed-bag ⊕ hashed n-grams."""
         span = self.action_span(ids)
         bag, _, _ = self.embed_bag(span)
         grams = hashed_ngrams(span, self.ngram_dim)
         return np.concatenate([self.bag_scale * bag, grams]).astype(np.float32)
 
-    def action_logits(self, ids: list[int]) -> np.ndarray:
-        return self.action_features(ids) @ self.w_act + self.b_act
+    def _user_span_bounds(self, ids: list[int]) -> tuple[int, int]:
+        if not ids:
+            return 0, 1
+        last_user = None
+        last_arm = None
+        for i, tok in enumerate(ids):
+            if int(tok) == USER_ID:
+                last_user = i
+            elif int(tok) == ARM_ID:
+                last_arm = i
+        if last_user is None:
+            start = max(0, len(ids) - 32)
+            return start, len(ids)
+        start = last_user
+        end = last_arm if (last_arm is not None and last_arm > start) else len(ids)
+        if end <= start:
+            end = min(len(ids), start + 1)
+        return start, end
 
-    def predict_action(self, ids: list[int]) -> str:
-        idx = int(np.argmax(self.action_logits(ids)))
+    def contextual_pool(self, ids: list[int]) -> np.ndarray:
+        if not ids:
+            ids = [0]
+        ids = ids[-self.max_seq :]
+        _, hidden = self.forward(ids, return_hidden=True)
+        start, end = self._user_span_bounds(ids)
+        start = max(0, min(start, hidden.shape[0] - 1))
+        end = max(start + 1, min(end, hidden.shape[0]))
+        return hidden[start:end].mean(axis=0).astype(np.float32)
+
+    def action_logits(self, ids: list[int], *, path: str | None = None) -> np.ndarray:
+        path = path or self.action_path
+        if path == "pre_attention":
+            return self.action_features(ids) @ self.w_act + self.b_act
+        pooled = self.contextual_pool(ids)
+        return pooled @ self.w_act_ctx + self.b_act_ctx
+
+    def action_heads(self, ids: list[int], *, path: str | None = None) -> tuple[np.ndarray, float, float]:
+        path = path or self.action_path
+        logits = self.action_logits(ids, path=path)
+        if path == "pre_attention":
+            return logits, 0.5, 0.0
+        pooled = self.contextual_pool(ids)
+        conf_raw = float(np.asarray(pooled @ self.w_conf + self.b_conf).reshape(-1)[0])
+        conf = float(1.0 / (1.0 + np.exp(-conf_raw)))
+        val = float(np.asarray(pooled @ self.w_val + self.b_val).reshape(-1)[0])
+        return logits, conf, val
+
+    def predict_action(self, ids: list[int], *, path: str | None = None) -> str:
+        idx = int(np.argmax(self.action_logits(ids, path=path)))
         return ACTION_ORDER[idx]
 
-    def predict_action_p(self, ids: list[int]) -> tuple[str, float]:
-        logits = self.action_logits(ids)
+    def predict_action_p(self, ids: list[int], *, path: str | None = None) -> tuple[str, float]:
+        logits = self.action_logits(ids, path=path)
         z = logits.astype(np.float64) - np.max(logits)
         e = np.exp(z)
         p = e / np.sum(e)
@@ -202,20 +266,30 @@ class DecoderTransformer:
         payload = {
             "tok": self.tok, "pos": self.pos, "head": self.head,
             "fng": self.fng, "fnb": self.fnb, "w_act": self.w_act, "b_act": self.b_act,
+            "w_act_ctx": self.w_act_ctx, "b_act_ctx": self.b_act_ctx,
+            "w_conf": self.w_conf, "b_conf": self.b_conf,
+            "w_val": self.w_val, "b_val": self.b_val,
         }
         for i, layer in enumerate(self.layers):
             for k, v in layer.items():
                 payload[f"l{i}_{k}"] = v
+        path_flag = 1 if self.action_path == "contextual" else 0
         np.savez_compressed(
             path,
             **payload,
-            meta=np.array([self.vocab_size, self.d_model, self.n_layer, self.n_head, self.max_seq, self.seed]),
+            meta=np.array([
+                self.vocab_size, self.d_model, self.n_layer, self.n_head,
+                self.max_seq, self.seed, path_flag,
+            ]),
         )
 
     @classmethod
     def load(cls, path: Path) -> "DecoderTransformer":
         data = np.load(path, allow_pickle=True)
         meta = data["meta"]
+        action_path = "contextual"
+        if len(meta) > 6:
+            action_path = "contextual" if int(meta[6]) == 1 else "pre_attention"
         model = cls(
             int(meta[0]),
             d_model=int(meta[1]),
@@ -223,6 +297,7 @@ class DecoderTransformer:
             n_head=int(meta[3]),
             max_seq=int(meta[4]),
             seed=int(meta[5]) if len(meta) > 5 else 7,
+            action_path=action_path,
         )
         model.tok = data["tok"]
         model.pos = data["pos"]
@@ -233,6 +308,16 @@ class DecoderTransformer:
             model.w_act = data["w_act"]
         if "b_act" in data.files and data["b_act"].shape == model.b_act.shape:
             model.b_act = data["b_act"]
+        for key, attr in (
+            ("w_act_ctx", "w_act_ctx"),
+            ("b_act_ctx", "b_act_ctx"),
+            ("w_conf", "w_conf"),
+            ("b_conf", "b_conf"),
+            ("w_val", "w_val"),
+            ("b_val", "b_val"),
+        ):
+            if key in data.files and data[key].shape == getattr(model, attr).shape:
+                setattr(model, attr, data[key])
         for i, layer in enumerate(model.layers):
             for k in list(layer.keys()):
                 key = f"l{i}_{k}"

@@ -1,12 +1,21 @@
 #!/usr/bin/env python3
 """Train the torch language-arm decoder on MetaField trajectories.
 
-Backprops through transformer blocks. Action loss on pooled user-span
-embeddings (pre-attention, same lesson as the numpy n-gram head). LM
-loss on composed <PROPOSE><ACTION>body<EOS>.
+Action pathways (ablatable):
 
-    python -m agent.language.torch_train
-    python -m agent.language.torch_train --examples 64 --steps 20
+  contextual (default):
+      action CE on post-attention pooled hidden — gradients flow through
+      Transformer blocks.
+
+  pre_attention (ablation):
+      action CE on pooled token+pos embeddings only (legacy path).
+
+LM loss still trains the decoder via teacher-forced
+<PROPOSE><ACTION>body<EOS>.
+
+    python -m agent.language.torch_train --action-path contextual
+    python -m agent.language.torch_train --action-path pre_attention
+    python -m agent.language.torch_train --compare-paths --examples 64 --steps 16
 """
 
 from __future__ import annotations
@@ -36,7 +45,7 @@ from agent.language.dataset import Example, from_trajectories, split_hold, synth
 from agent.language.tokenizer import ArmTokenizer
 from agent.language.transformer import ACTION_ORDER
 
-DEFAULT_CKPT = Path("/tmp/metafield/arm_gpt_v0.pt")
+DEFAULT_CKPT = Path("/tmp/metafield/arm_gpt_v1.pt")
 
 
 def _pad_batch(examples: list[Example], pad_id: int, max_seq: int, torch):
@@ -86,14 +95,13 @@ def evaluate(model, examples: list[Example], torch) -> dict:
 
 
 def learn_one(model, prompt: list[int], action_index: int, *, lr: float = 1e-3) -> dict:
-    """Single-example CE on the torch action head. Used by `--learn`."""
+    """Single-example CE on the torch action head. Uses model.action_path."""
     torch = _require_torch()
     import torch.nn.functional as F
     model.train()
     opt = torch.optim.SGD(model.parameters(), lr=lr)
     ids = torch.tensor([prompt[-model.max_seq :]], dtype=torch.long)
-    pooled = model.pool_user_span(model.embed(ids), ids)
-    logits = model.w_act(pooled)
+    logits, _, _ = model.action_heads(ids)
     gold = torch.tensor([action_index], dtype=torch.long)
     loss = F.cross_entropy(logits, gold)
     opt.zero_grad()
@@ -113,13 +121,16 @@ def run(
     seed: int = 7,
     batch: int = 8,
     trajectories: Path | None = None,
+    action_path: str = "contextual",
 ) -> dict:
     torch = _require_torch()
     from agent.language.torch_model import PAD_ID, ArmGPT
 
+    if action_path not in ("contextual", "pre_attention"):
+        raise ValueError(f"unknown action_path: {action_path}")
     torch.manual_seed(seed)
     tok = ArmTokenizer()
-    model = ArmGPT(tok.vocab_size)
+    model = ArmGPT(tok.vocab_size, action_path=action_path)  # type: ignore[arg-type]
     data = synthesize(examples, tokenizer=tok)
     traj_path = trajectories
     if traj_path is None and os.environ.get("ARM_TRAJECTORIES"):
@@ -155,7 +166,7 @@ def run(
                 )
             else:
                 lm_loss = torch.zeros((), device=ids.device)
-            alogits = model.w_act(model.pool_user_span(model.embed(pr), pr))
+            alogits, _, _ = model.action_heads(pr, key_padding_mask=pr_mask)
             act_loss = F.cross_entropy(alogits, act)
             loss = act_loss + 0.4 * lm_loss
             opt.zero_grad()
@@ -203,10 +214,50 @@ def run(
         "tokenizer": tok.version,
         "model": loaded.version,
         "backend": "torch",
+        "action_path": action_path,
         "history": hist[-6:],
         "ok": best >= 0.5 and reload_ev["action_acc"] >= 0.5,
     }
     return summary
+
+
+def compare_paths(
+    *,
+    examples: int,
+    steps: int,
+    lr: float,
+    batch: int,
+    seed: int = 7,
+    trajectories: Path | None = None,
+) -> dict:
+    """Same data/seed/budget: contextual vs pre_attention hold accuracy."""
+    results = {}
+    for path in ("pre_attention", "contextual"):
+        ckpt = Path(f"/tmp/metafield/arm_gpt_ablation_{path}.pt")
+        print(f"[torch] === action_path={path} ===", flush=True)
+        summary = run(
+            examples=examples,
+            steps=steps,
+            lr=lr,
+            ckpt=ckpt,
+            seed=seed,
+            batch=batch,
+            trajectories=trajectories,
+            action_path=path,
+        )
+        results[path] = {
+            "hold_acc": summary["hold_acc"],
+            "reload_acc": summary["reload_acc"],
+            "per_class": summary["per_class"],
+            "checkpoint": summary["checkpoint"],
+        }
+    out = {
+        "comparison": results,
+        "delta_hold_acc": results["contextual"]["hold_acc"] - results["pre_attention"]["hold_acc"],
+        "note": "Same dataset, seed, optimizer, budget. Contextual routes action loss through attention.",
+    }
+    print(json.dumps(out, indent=2), flush=True)
+    return results
 
 
 def main() -> None:
@@ -218,7 +269,29 @@ def main() -> None:
     p.add_argument("--batch", type=int, default=8)
     p.add_argument("--checkpoint", type=Path, default=DEFAULT_CKPT)
     p.add_argument("--trajectories", type=Path, default=None)
+    p.add_argument(
+        "--action-path",
+        choices=("contextual", "pre_attention"),
+        default="contextual",
+        help="Action head pathway (default: contextual = post-attention pool)",
+    )
+    p.add_argument(
+        "--compare-paths",
+        action="store_true",
+        help="Train both pathways with identical budget; print hold_acc comparison",
+    )
+    p.add_argument("--seed", type=int, default=7)
     args = p.parse_args()
+    if args.compare_paths:
+        compare_paths(
+            examples=args.examples,
+            steps=args.steps,
+            lr=args.lr,
+            batch=args.batch,
+            seed=args.seed,
+            trajectories=args.trajectories,
+        )
+        return
     summary = run(
         examples=args.examples,
         steps=args.steps,
@@ -226,11 +299,17 @@ def main() -> None:
         ckpt=args.checkpoint,
         batch=args.batch,
         trajectories=args.trajectories,
+        action_path=args.action_path,
+        seed=args.seed,
     )
     print(json.dumps({k: v for k, v in summary.items() if k != "history"}, indent=2), flush=True)
     if not summary["ok"]:
         raise SystemExit(1)
-    print("[torch] checkpoint written. Decoder blocks actually trained.", flush=True)
+    print(
+        f"[torch] checkpoint written. action_path={args.action_path}. "
+        "Action gradients reach decoder blocks when path=contextual.",
+        flush=True,
+    )
 
 
 if __name__ == "__main__":
