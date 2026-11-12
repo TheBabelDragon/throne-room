@@ -73,7 +73,9 @@ def _energy(measurement: Mapping[str, Any]) -> float | None:
     elif "m:csi_energy" in measurement and measurement["m:csi_energy"] is not None:
         raw = measurement["m:csi_energy"]
     else:
-        return None
+        raw = measurement.get("energy", measurement.get("csi_energy"))
+        if raw is None:
+            return None
     try:
         return float(raw)
     except (TypeError, ValueError):
@@ -119,12 +121,11 @@ def decide(
     energy_val = energy if energy is not None else -1.0
     synthetic = _is_synthetic(perception.measurement)
     body_status = _body_status(perception.measurement)
-    is_shared = perception.modality == "shared_body" or "body_id" in perception.measurement
+    is_shared = perception.modality == "shared_body"
     meas_changed = bool(perception.measurement.get("measurement_changed"))
     is_new_body = bool(perception.measurement.get("is_new"))
     is_returning = bool(perception.measurement.get("is_returning"))
 
-    # Stale / timed-out observations are not current evidence
     if is_shared and body_status in ("STALE", "TIMEOUT", "MISSING"):
         return ActionProposal(
             proposal_id=_proposal_id(perception.observation_id, "WAIT"),
@@ -138,21 +139,19 @@ def decide(
             capability=ACTION_CAPABILITY["WAIT"],
         )
 
-    # Synthetic fixtures must not authorize physical contact probes
-    if synthetic and energy_val >= ENERGY_CONTACT:
+    if is_shared and synthetic and energy_val >= ENERGY_CONTACT:
         return ActionProposal(
             proposal_id=_proposal_id(perception.observation_id, "ATTEND"),
             action_type="ATTEND",
             parameters={"target": perception.source or "field", "synthetic": True},
             target=perception.source or "field",
-            rationale="Synthetic fixture present; attend only — not physical evidence.",
+            rationale="SHARED_BODY synthetic fixture; attend only — not physical evidence.",
             confidence=0.70,
             originating_observation=perception.observation_id,
             agent_id=identity.agent_id,
             capability=ACTION_CAPABILITY.get("ATTEND", "observe.field"),
         )
 
-    # Unchanged returning body: do not re-attend the same data
     if is_shared and is_returning and not meas_changed and not is_new_body:
         return ActionProposal(
             proposal_id=_proposal_id(perception.observation_id, "WAIT"),
@@ -166,6 +165,8 @@ def decide(
             capability=ACTION_CAPABILITY["WAIT"],
         )
 
+    # Numeric comparisons use energy_val; missing energy never authorizes contact
+    energy = energy_val
     last_action = str(memory.get("last_action") or "")
     last_energy = memory.get("last_energy")
     try:
@@ -179,25 +180,28 @@ def decide(
     rationale = "Nothing in the perception view warrants motion."
     confidence = 0.60
 
-    if last_action == "PROBE" and last_energy_f is not None:
-        if energy is not None and energy + 1e-9 >= last_energy_f:
-            action = "PROBE"
-            params = {"magnitude": 0.45}
-            if perception.location:
-                params["x"] = perception.location.get("x", 8)
-                params["z"] = perception.location.get("z", 8)
-            target = "field"
+    if perception.modality == "language":
+        action = "SPEAK"
+        params = {"text": str(perception.measurement.get("text", ""))}
+        target = "chat"
+        rationale = "Language observation; speak within habitat."
+        confidence = 0.75
+    elif last_action == "PROBE" and last_energy_f is not None:
+        if energy + 1e-9 >= last_energy_f:
+            action = "REMEMBER"
+            params = {"note": "probe_held"}
+            target = "self"
             rationale = (
-                f"Prior probe held; energy {last_energy_f:.4f} → {energy_val:.4f}"
+                f"Probe consequence held; energy {last_energy_f:.4f} → {energy:.4f}"
             )
-            confidence = 0.82
+            confidence = 0.88
         else:
             action = "ATTEND"
             params = {"target": "field"}
             target = "field"
             rationale = "Probe did not hold energy; attend before acting again."
             confidence = 0.80
-    elif last_action == "ATTEND" and energy_val >= ENERGY_CONTACT:
+    elif last_action == "ATTEND" and energy >= ENERGY_CONTACT:
         action = "PROBE"
         params = {"magnitude": 0.45}
         if perception.location:
@@ -206,7 +210,7 @@ def decide(
         target = "field"
         rationale = "Attended the lake; curiosity authorizes a bounded probe."
         confidence = 0.78
-    elif last_action == "" and energy_val >= ENERGY_CONTACT:
+    elif last_action == "" and energy >= ENERGY_CONTACT:
         action = "PROBE"
         params = {"magnitude": 0.45}
         if perception.location:
@@ -215,7 +219,7 @@ def decide(
         target = "field"
         rationale = "First contact with a live measurement; bounded probe."
         confidence = 0.76
-    elif energy_val >= ENERGY_ATTEND or perception.channels:
+    elif energy >= ENERGY_ATTEND or perception.channels:
         action = "ATTEND"
         params = {"target": perception.source or "field"}
         target = perception.source or "field"
