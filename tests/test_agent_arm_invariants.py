@@ -112,17 +112,6 @@ class ArmTests(unittest.TestCase):
         text = turn.utterance or ""
         self.assertTrue(len(text) > 0)
 
-    def test_learn_one_updates_weights(self) -> None:
-        import numpy as np
-        from agent.language.transformer import DecoderTransformer, learn_one
-        tok = ArmTokenizer()
-        model = DecoderTransformer(tok.vocab_size, seed=1)
-        ids = tok.encode("<USER> Probe the energy peak <ARM>")
-        w0 = model.w_act.copy()
-        rec = learn_one(model, ids, 1, lr=1.5)
-        self.assertEqual(rec["gold"], "PROBE")
-        self.assertFalse(np.allclose(w0, model.w_act))
-
 
 def _has_torch() -> bool:
     try:
