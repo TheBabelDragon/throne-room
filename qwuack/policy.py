@@ -64,12 +64,28 @@ def _proposal_id(observation_id: str, action_type: str) -> str:
     return f"prp_qwuack_{fnv1a(f'{observation_id}:{action_type}')}"
 
 
-def _energy(measurement: Mapping[str, Any]) -> float:
-    raw = measurement.get("energy", measurement.get("csi_energy", 0.0))
+def _energy(measurement: Mapping[str, Any]) -> float | None:
+    """Return energy only when genuinely present. None = missing (not zero)."""
+    if "energy" in measurement and measurement["energy"] is not None:
+        raw = measurement["energy"]
+    elif "csi_energy" in measurement and measurement["csi_energy"] is not None:
+        raw = measurement["csi_energy"]
+    elif "m:csi_energy" in measurement and measurement["m:csi_energy"] is not None:
+        raw = measurement["m:csi_energy"]
+    else:
+        return None
     try:
         return float(raw)
     except (TypeError, ValueError):
-        return 0.0
+        return None
+
+
+def _is_synthetic(measurement: Mapping[str, Any]) -> bool:
+    return bool(measurement.get("synthetic", False))
+
+
+def _body_status(measurement: Mapping[str, Any]) -> str:
+    return str(measurement.get("status") or "UNKNOWN")
 
 
 def _working(self_state: Mapping[str, Any]) -> dict[str, Any]:
@@ -100,6 +116,56 @@ def decide(
     caps = set(capabilities)
     memory = _working(self_state)
     energy = _energy(perception.measurement)
+    energy_val = energy if energy is not None else -1.0
+    synthetic = _is_synthetic(perception.measurement)
+    body_status = _body_status(perception.measurement)
+    is_shared = perception.modality == "shared_body" or "body_id" in perception.measurement
+    meas_changed = bool(perception.measurement.get("measurement_changed"))
+    is_new_body = bool(perception.measurement.get("is_new"))
+    is_returning = bool(perception.measurement.get("is_returning"))
+
+    # Stale / timed-out observations are not current evidence
+    if is_shared and body_status in ("STALE", "TIMEOUT", "MISSING"):
+        return ActionProposal(
+            proposal_id=_proposal_id(perception.observation_id, "WAIT"),
+            action_type="WAIT",
+            parameters={},
+            target="field",
+            rationale=f"Observation status {body_status}; not treating as current.",
+            confidence=0.95,
+            originating_observation=perception.observation_id,
+            agent_id=identity.agent_id,
+            capability=ACTION_CAPABILITY["WAIT"],
+        )
+
+    # Synthetic fixtures must not authorize physical contact probes
+    if synthetic and energy_val >= ENERGY_CONTACT:
+        return ActionProposal(
+            proposal_id=_proposal_id(perception.observation_id, "ATTEND"),
+            action_type="ATTEND",
+            parameters={"target": perception.source or "field", "synthetic": True},
+            target=perception.source or "field",
+            rationale="Synthetic fixture present; attend only — not physical evidence.",
+            confidence=0.70,
+            originating_observation=perception.observation_id,
+            agent_id=identity.agent_id,
+            capability=ACTION_CAPABILITY.get("ATTEND", "observe.field"),
+        )
+
+    # Unchanged returning body: do not re-attend the same data
+    if is_shared and is_returning and not meas_changed and not is_new_body:
+        return ActionProposal(
+            proposal_id=_proposal_id(perception.observation_id, "WAIT"),
+            action_type="WAIT",
+            parameters={"body_id": perception.measurement.get("body_id")},
+            target=perception.source or "field",
+            rationale="Returning body with unchanged measurements; WAIT.",
+            confidence=0.85,
+            originating_observation=perception.observation_id,
+            agent_id=identity.agent_id,
+            capability=ACTION_CAPABILITY["WAIT"],
+        )
+
     last_action = str(memory.get("last_action") or "")
     last_energy = memory.get("last_energy")
     try:
@@ -107,35 +173,31 @@ def decide(
     except (TypeError, ValueError):
         last_energy_f = None
 
-    text = str(perception.measurement.get("text") or "").strip()
+    action = "WAIT"
+    params: dict[str, Any] = {}
+    target = "field"
+    rationale = "Nothing in the perception view warrants motion."
+    confidence = 0.60
 
-    if perception.modality == "language" and text:
-        action = "SPEAK"
-        params: dict[str, Any] = {
-            "text": "Qwuack heard the operator. Attending the lake.",
-        }
-        target = "chat"
-        rationale = "Language perception arrived on the existing chat actuator."
-        confidence = 0.84
-    elif last_action == "PROBE" and last_energy_f is not None:
-        if energy + 1e-9 >= last_energy_f:
-            action = "REMEMBER"
-            params = {
-                "note": (
-                    f"tick {perception.sequence}: probe consequence held "
-                    f"energy {last_energy_f:.4f} → {energy:.4f}"
-                )
-            }
-            target = "memory"
-            rationale = "Observed probe consequence; retain it in SELF."
-            confidence = 0.88
+    if last_action == "PROBE" and last_energy_f is not None:
+        if energy is not None and energy + 1e-9 >= last_energy_f:
+            action = "PROBE"
+            params = {"magnitude": 0.45}
+            if perception.location:
+                params["x"] = perception.location.get("x", 8)
+                params["z"] = perception.location.get("z", 8)
+            target = "field"
+            rationale = (
+                f"Prior probe held; energy {last_energy_f:.4f} → {energy_val:.4f}"
+            )
+            confidence = 0.82
         else:
             action = "ATTEND"
             params = {"target": "field"}
             target = "field"
             rationale = "Probe did not hold energy; attend before acting again."
             confidence = 0.80
-    elif last_action == "ATTEND" and energy >= ENERGY_CONTACT:
+    elif last_action == "ATTEND" and energy_val >= ENERGY_CONTACT:
         action = "PROBE"
         params = {"magnitude": 0.45}
         if perception.location:
@@ -144,7 +206,7 @@ def decide(
         target = "field"
         rationale = "Attended the lake; curiosity authorizes a bounded probe."
         confidence = 0.78
-    elif last_action == "" and energy >= ENERGY_CONTACT:
+    elif last_action == "" and energy_val >= ENERGY_CONTACT:
         action = "PROBE"
         params = {"magnitude": 0.45}
         if perception.location:
@@ -153,7 +215,7 @@ def decide(
         target = "field"
         rationale = "First contact with a live measurement; bounded probe."
         confidence = 0.76
-    elif energy >= ENERGY_ATTEND or perception.channels:
+    elif energy_val >= ENERGY_ATTEND or perception.channels:
         action = "ATTEND"
         params = {"target": perception.source or "field"}
         target = perception.source or "field"
