@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Field Intelligence · Throne Room</title>
+  <style>
+    :root { --bg:#0b0e11; --panel:#12171c; --border:#1e2730; --text:#d7e0ea; --muted:#7a8a99; --live:#3ecf8e; --sim:#a78bfa; --warn:#e6b35a; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family: system-ui, sans-serif; background:var(--bg); color:var(--text); }
+    header { padding:1rem 1.25rem; border-bottom:1px solid var(--border); display:flex; flex-wrap:wrap; gap:.75rem; align-items:baseline; }
+    h1 { font-size:1.1rem; margin:0; } .sub { color:var(--muted); font-size:.85rem; }
+    .badge { font-size:.7rem; text-transform:uppercase; padding:.15rem .45rem; border:1px solid var(--border); border-radius:3px; color:var(--muted); }
+    main { display:grid; gap:.75rem; padding:.75rem; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); max-width:1400px; margin:0 auto; }
+    section { background:var(--panel); border:1px solid var(--border); border-radius:6px; padding:.9rem 1rem; min-height:160px; }
+    h2 { margin:0 0 .6rem; font-size:.8rem; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); }
+    .empty { color:var(--muted); font-size:.85rem; font-style:italic; }
+    footer { max-width:1400px; margin:0 auto; padding:1rem 1.25rem 2rem; color:var(--muted); font-size:.8rem; }
+    code { font-family: ui-monospace, monospace; font-size:.85em; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Field Intelligence</h1>
+    <span class="sub">Throne Room · scientific instrument surface</span>
+    <span class="badge" id="mode-badge">OFFLINE</span>
+  </header>
+  <main>
+    <section><h2>World Mirror</h2><div class="empty">No live snapshot. Bind SHARED_BODY / WorldMirror. Never displays simulated values as live.</div></section>
+    <section><h2>Memory</h2><div class="empty">Associative memory offline until experiences are appended.</div></section>
+    <section><h2>Decision Observatory</h2><div class="empty">Witness only. No admission authority.</div></section>
+    <section><h2>Counterfactual Lab</h2><div class="empty">Experiments are SIMULATION only. Live FieldTick is never mutated here.</div></section>
+    <section><h2>Research Desk</h2><div class="empty">Millennium Lab / workbench. Finite evidence is not unrestricted proof.</div></section>
+    <section><h2>Predictions</h2><div class="empty">Pending / matched / mismatched from PredictionStore.</div></section>
+  </main>
+  <footer>
+    <p>Offline-first shell. Does not invent metrics. Modes: LIVE · REPLAY · SIMULATION · FIXTURE · OFFLINE. See <code>docs/FIELD_INTELLIGENCE.md</code>.</p>
+  </footer>
+</body>
+</html>

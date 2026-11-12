@@ -31,6 +31,18 @@ python -m unittest tests.test_millennium_lab tests.test_duck_workbench
 Contract: [docs/MILLENNIUM.md](docs/MILLENNIUM.md),
 [docs/WORKBENCH.md](docs/WORKBENCH.md).
 
+## Field Intelligence v1
+
+World Mirror · Associative Memory · Counterfactual Lab · Decision Observatory · Prediction.
+
+Additive experimental environment on the existing SHARED_BODY → perception → Duck Gate → Operator ABI → FieldTick path. Does not grant `act.device`, does not own UDP `:4210`, and does not mutate live FieldTick from counterfactuals.
+
+```bash
+python -m unittest tests.test_field_intelligence -v
+```
+
+Docs: [docs/FIELD_INTELLIGENCE.md](docs/FIELD_INTELLIGENCE.md). Console shell: [web/field-intelligence.html](web/field-intelligence.html) (offline-first; does not invent metrics).
+
 The live-observer walkthrough, language-arm desk, measurement defaults,
 and sibling-repo table are unchanged from `main`. Keep using
 `python -m observer.startup --full` for the CSI conductor.
