@@ -206,3 +206,167 @@ class FeedTests(unittest.TestCase):
             got = world.drain_feeds()
             self.assertEqual(got["csi"], 1)
             self.assertEqual(world.last_obs.body_id, "b")
+
+    def test_poll_caps_and_keeps_rest(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "csi.jsonl"
+            lines = [
+                json.dumps({"type": "wifi_csi", "node": f"n{i}", "rssi": -50, "csi": [0.2] * 8})
+                for i in range(40)
+            ]
+            path.write_text("\n".join(lines) + "\n")
+            cur = JsonlCursor(path, keep=8)
+            cur.catch_up_keep(8)
+            extra = [
+                json.dumps({"type": "wifi_csi", "node": f"x{i}", "rssi": -40, "csi": [0.4] * 8})
+                for i in range(20)
+            ]
+            with path.open("a") as fh:
+                fh.write("\n".join(extra) + "\n")
+            first = cur.poll(max_records=5)
+            self.assertEqual(len(first), 5)
+            self.assertEqual(first[0]["node"], "x0")
+            second = cur.poll(max_records=5)
+            self.assertEqual(len(second), 5)
+            self.assertEqual(second[0]["node"], "x5")
+
+    def test_incomplete_line_waits(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "csi.jsonl"
+            path.write_text("")
+            cur = JsonlCursor(path, keep=4)
+            cur.catch_up_keep(4)
+            with path.open("ab") as fh:
+                fh.write(b'{"type":"wifi_csi","node":"partial"')
+            self.assertEqual(cur.poll(), [])
+            with path.open("ab") as fh:
+                fh.write(b',"rssi":-50,"csi":[0.1,0.2]}\n')
+            got = cur.poll()
+            self.assertEqual(len(got), 1)
+            self.assertEqual(got[0]["node"], "partial")
+
+    def test_file_appears_does_not_replay_history(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "csi.jsonl"
+            cur = JsonlCursor(path, keep=2)
+            self.assertEqual(cur.catch_up_keep(2), [])
+            hist = [
+                json.dumps({"type": "wifi_csi", "node": "old", "rssi": -70, "csi": [0.1] * 8}),
+                json.dumps({"type": "wifi_csi", "node": "keep-a", "rssi": -40, "csi": [0.5] * 8}),
+                json.dumps({"type": "wifi_csi", "node": "keep-b", "rssi": -41, "csi": [0.5] * 8}),
+            ]
+            path.write_text("\n".join(hist) + "\n")
+            got = cur.poll()
+            self.assertEqual(len(got), 2)
+            self.assertEqual(got[0]["node"], "keep-a")
+            self.assertEqual(cur.poll(), [])
+
+    def test_handle_human_caps_backlog(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            csi = Path(td) / "csi.jsonl"
+            lines = [
+                json.dumps({"type": "wifi_csi", "node": f"b{i}", "rssi": -50, "csi": [0.2] * 8})
+                for i in range(200)
+            ]
+            csi.write_text("\n".join(lines) + "\n")
+            world = World(memory_path=Path(td) / "mem.jsonl")
+            world.attach_feeds(csi=csi, warmup=4)
+            with csi.open("a") as fh:
+                for i in range(80):
+                    fh.write(json.dumps({
+                        "type": "wifi_csi", "node": f"new{i}", "rssi": -45, "csi": [0.3] * 8,
+                    }) + "\n")
+            t0 = time.monotonic()
+            turn = world.handle_human("What do you perceive?")
+            elapsed = time.monotonic() - t0
+            self.assertIsNotNone(turn)
+            self.assertLess(elapsed, 3.0)
+            self.assertLessEqual(world.packets_ingested, 4 + 24 + 2)
+
+    def test_aurora_probe_commits_locally_not_device(self) -> None:
+        world = World()
+        world.live = True
+        e0 = world.scheduler.field.sum(Channel.Energy)
+        ok = world.observe_aurora({
+            "action": "probe",
+            "priority": 0.85,
+            "reason": "field pressure",
+            "body_id": "cyd-a",
+            "params": {"pressure": 0.85},
+        })
+        self.assertTrue(ok)
+        self.assertGreater(world.scheduler.field.sum(Channel.Energy), e0)
+        self.assertFalse(world.abi.has("act.device"))
+        self.assertEqual(world.self.peek("working.last_aurora")["action"], "PROBE")
+
+    def test_tick_journal(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            ticks = Path(td) / "ticks.jsonl"
+            world = World()
+            world.ticks_path = ticks
+            world.step()
+            self.assertTrue(ticks.exists())
+            rec = json.loads(ticks.read_text().splitlines()[0])
+            self.assertEqual(rec["schema"], "metafield.tick")
+            self.assertEqual(rec["sequence"], 1)
+            self.assertEqual(rec["hash"], world.last_hash)
+
+    def test_int_ticks_path_does_not_crash(self) -> None:
+        world = World()
+        world.ticks_path = 4  # type: ignore[assignment]
+        world.step()
+        self.assertEqual(world.scheduler.sequence, 1)
+
+    def test_attach_feeds_rejects_int_journal(self) -> None:
+        world = World()
+        with self.assertRaises(TypeError):
+            world.attach_feeds(ticks=4)  # type: ignore[arg-type]
+
+    def test_cli_live_follow_ticks_flag_is_not_a_path(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            csi = Path(td) / "csi.jsonl"
+            aurora = Path(td) / "aurora.jsonl"
+            journal = Path(td) / "ticks.jsonl"
+            pkt = {"type": "wifi_csi", "node": "cyd-a", "rssi": -51, "csi": [0.3] * 32}
+            csi.write_text(json.dumps(pkt) + "\n")
+            aurora.write_text("")
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(ROOT)
+            proc = subprocess.Popen(
+                [
+                    sys.executable, "-m", "agent.chat",
+                    "--live", "--follow", "--interval", "0.05",
+                    "--csi", str(csi), "--aurora", str(aurora),
+                    "--journal", str(journal), "--ticks", "4", "--warmup", "8",
+                ],
+                cwd=str(ROOT),
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            try:
+                time.sleep(0.35)
+                with csi.open("a") as fh:
+                    fh.write(json.dumps({
+                        "type": "wifi_csi", "node": "cyd-b", "rssi": -47, "csi": [0.5] * 32,
+                    }) + "\n")
+                    fh.flush()
+                time.sleep(0.45)
+                proc.send_signal(signal.SIGINT)
+                out, _ = proc.communicate(timeout=8)
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait(timeout=3)
+                    out = proc.stdout.read() if proc.stdout else ""
+            self.assertNotIn("AttributeError", out)
+            self.assertIn("follow mode", out)
+            self.assertTrue(journal.exists())
+            recs = [json.loads(line) for line in journal.read_text().splitlines() if line.strip()]
+            self.assertGreaterEqual(len(recs), 1)
+            self.assertEqual(recs[0]["schema"], "metafield.tick")
+
+
+if __name__ == "__main__":
+    unittest.main()
