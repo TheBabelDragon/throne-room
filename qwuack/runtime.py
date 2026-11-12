@@ -25,6 +25,12 @@ from agent.schemas import ActionProposal, FieldObservation, PerceptionEvent
 from qwuack.identity import QWUACK, QwuackIdentity
 from qwuack.policy import decide, perception_view
 
+# Optional Field Intelligence live-path bridge (additive; never owns FieldTick).
+try:
+    from agent.field_intelligence.pipeline import FieldIntelligenceBridge
+except ImportError:  # pragma: no cover
+    FieldIntelligenceBridge = None  # type: ignore[misc, assignment]
+
 STATUS_PATH = Path("/tmp/metafield/qwuack_status.json")
 DT_PAUSE = 0.25
 
@@ -69,6 +75,9 @@ class Runtime:
         identity: QwuackIdentity = QWUACK,
         status_path: Path | None = STATUS_PATH,
         state_path: Path | None = None,
+        *,
+        field_intelligence: bool = True,
+        fi_root: Path | None = None,
     ) -> None:
         self.world = world or World()
         self.identity = identity
@@ -77,6 +86,9 @@ class Runtime:
         self.status = Status(habitat=identity.habitat)
         self.last_turn: Turn | None = None
         self.awake = False
+        self.fi: Any | None = None
+        if field_intelligence and FieldIntelligenceBridge is not None:
+            self.fi = FieldIntelligenceBridge(root=fi_root)
 
     def wake(self) -> Status:
         """Stamp identity into SELF. Does not touch the Field."""
@@ -182,12 +194,79 @@ class Runtime:
 
         proposal = self.perceive(event)
         self.world.last_proposal = proposal
+
+        # Field Intelligence: observation → World Mirror + memory (witness only)
+        if self.fi is not None and obs is not None:
+            energy_val = _obs_energy(obs)
+            self.fi.on_observation(
+                observation_id=event.id,
+                body_id=obs.body_id,
+                synthetic=bool(obs.synthetic),
+                status="ALIVE" if obs.valid else "UNKNOWN",
+                energy=energy_val,
+                measurements={
+                    r.name: float(r.observed) for r in (obs.regions or [])
+                },
+                source_system="csi",
+                source_node_id=obs.body_id,
+                observed_at=str(obs.timestamp),
+                sequence=self.world.scheduler.sequence + 1,
+                modality=event.modality,
+            )
+            # memory retrieval available for policy / report; does not authorize
+            _ = self.fi.retrieve_for_body(obs.body_id, query=proposal.action_type)
+
         decision = self.submit(proposal)
         self.world.last_decision = decision
+
+        decision_id = None
+        if self.fi is not None:
+            decision_id = self.fi.on_proposal(
+                observation_id=event.id,
+                proposal_id=proposal.proposal_id,
+                action_type=proposal.action_type,
+                rationale=getattr(proposal, "rationale", "") or "",
+                sequence=self.world.scheduler.sequence + 1,
+            )
+
         self.apply_decision(decision, event.id)
 
         self.world.step(obs)
         consequence = self.observe_tick(proposal, decision, energy_before)
+
+        if self.fi is not None:
+            self.fi.on_admission(
+                decision_id=decision_id,
+                proposal_id=proposal.proposal_id,
+                accepted=bool(decision.accepted),
+                reason=str(getattr(decision, "reason", "") or ""),
+                tick_sequence=self.world.scheduler.sequence,
+            )
+            energy_after = _csi_energy(self.world)
+            if obs is not None:
+                energy_after = _obs_energy(obs)
+            seed = None
+            if obs is not None and obs.synthetic:
+                try:
+                    seed = int(float(obs.timestamp))
+                except (TypeError, ValueError):
+                    seed = self.world.scheduler.sequence
+            self.fi.on_consequence(
+                observation_id=event.id,
+                body_id=None if obs is None else obs.body_id,
+                synthetic=bool(obs.synthetic) if obs is not None else True,
+                action_type=proposal.action_type,
+                accepted=bool(decision.accepted),
+                admission_reason=str(getattr(decision, "reason", "") or ""),
+                tick_sequence=self.world.scheduler.sequence,
+                tick_hash=self.world.last_hash,
+                consequence=consequence,
+                energy_before=energy_before,
+                energy_after=energy_after,
+                sequence=self.world.scheduler.sequence,
+                observation_seed=seed,
+                action_params=dict(getattr(proposal, "params", None) or {}),
+            )
 
         turn = Turn(
             perception=event,
@@ -338,10 +417,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--aurora", type=Path, default=None)
     parser.add_argument("--journal", type=Path, default=None)
     parser.add_argument("--interval", type=float, default=DT_PAUSE)
+    parser.add_argument(
+        "--no-field-intelligence",
+        action="store_true",
+        help="Disable Field Intelligence live-path bridge (World Mirror / memory / observatory)",
+    )
+    parser.add_argument(
+        "--fi-root",
+        type=Path,
+        default=None,
+        help="Root directory for Field Intelligence journals (default /tmp/metafield/field_intelligence)",
+    )
     args = parser.parse_args(argv)
 
     world = World(memory_path=DEFAULT_MEMORY if args.live else None)
-    runtime = Runtime(world=world)
+    runtime = Runtime(
+        world=world,
+        field_intelligence=not args.no_field_intelligence,
+        fi_root=args.fi_root,
+    )
     runtime.wake()
     print(runtime.status.render(), flush=True)
 
