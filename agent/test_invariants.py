@@ -206,3 +206,26 @@ class FeedTests(unittest.TestCase):
             got = world.drain_feeds()
             self.assertEqual(got["csi"], 1)
             self.assertEqual(world.last_obs.body_id, "b")
+
+    def test_poll_caps_and_keeps_rest(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "csi.jsonl"
+            lines = [
+                json.dumps({"type": "wifi_csi", "node": f"n{i}", "rssi": -50, "csi": [0.2] * 8})
+                for i in range(40)
+            ]
+            path.write_text("\n".join(lines) + "\n")
+            cur = JsonlCursor(path, keep=8)
+            cur.catch_up_keep(8)
+            extra = [
+                json.dumps({"type": "wifi_csi", "node": f"x{i}", "rssi": -40, "csi": [0.4] * 8})
+                for i in range(20)
+            ]
+            with path.open("a") as fh:
+                fh.write("\n".join(extra) + "\n")
+            first = cur.poll(max_records=5)
+            self.assertEqual(len(first), 5)
+            self.assertEqual(first[0]["node"], "x0")
+            second = cur.poll(max_records=5)
+            self.assertEqual(len(second), 5)
+            self.assertEqual(second[0]["node"], "x5")
