@@ -5,18 +5,30 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Field Intelligence · Throne Room</title>
   <style>
-    :root { --bg:#0b0e11; --panel:#12171c; --border:#1e2730; --text:#d7e0ea; --muted:#7a8a99; --live:#3ecf8e; --sim:#a78bfa; --warn:#e6b35a; }
+    :root { --bg:#0b0e11; --panel:#12171c; --border:#1e2730; --text:#d7e0ea; --muted:#7a8a99; --live:#3ecf8e; --sim:#a78bfa; --warn:#e6b35a; --err:#e06c75; }
     * { box-sizing: border-box; }
     body { margin:0; font-family: system-ui, sans-serif; background:var(--bg); color:var(--text); }
-    header { padding:1rem 1.25rem; border-bottom:1px solid var(--border); display:flex; flex-wrap:wrap; gap:.75rem; align-items:baseline; }
+    header { padding:1rem 1.25rem; border-bottom:1px solid var(--border); display:flex; flex-wrap:wrap; gap:.75rem; align-items:center; }
     h1 { font-size:1.1rem; margin:0; } .sub { color:var(--muted); font-size:.85rem; }
     .badge { font-size:.7rem; text-transform:uppercase; padding:.15rem .45rem; border:1px solid var(--border); border-radius:3px; color:var(--muted); }
+    .badge.live { color:var(--live); border-color:var(--live); }
+    .badge.fixture { color:var(--warn); border-color:var(--warn); }
+    .badge.sim { color:var(--sim); border-color:var(--sim); }
     main { display:grid; gap:.75rem; padding:.75rem; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); max-width:1400px; margin:0 auto; }
-    section { background:var(--panel); border:1px solid var(--border); border-radius:6px; padding:.9rem 1rem; min-height:160px; }
+    section { background:var(--panel); border:1px solid var(--border); border-radius:6px; padding:.9rem 1rem; min-height:140px; }
     h2 { margin:0 0 .6rem; font-size:.8rem; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); }
     .empty { color:var(--muted); font-size:.85rem; font-style:italic; }
+    pre, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size:.78rem; white-space:pre-wrap; word-break:break-word; margin:0; line-height:1.35; }
+    .row { display:flex; flex-wrap:wrap; gap:.5rem; align-items:center; margin-bottom:.5rem; }
+    label.file { font-size:.75rem; color:var(--muted); border:1px dashed var(--border); padding:.25rem .5rem; border-radius:4px; cursor:pointer; }
+    label.file input { display:none; }
+    button { background:#1a222c; color:var(--text); border:1px solid var(--border); border-radius:4px; padding:.3rem .6rem; font-size:.75rem; cursor:pointer; }
+    button:hover { border-color:var(--muted); }
+    ul.compact { margin:0; padding-left:1.1rem; font-size:.82rem; }
+    li { margin:.2rem 0; }
     footer { max-width:1400px; margin:0 auto; padding:1rem 1.25rem 2rem; color:var(--muted); font-size:.8rem; }
     code { font-family: ui-monospace, monospace; font-size:.85em; }
+    .stat { display:inline-block; margin-right:.75rem; font-size:.8rem; }
   </style>
 </head>
 <body>
@@ -24,17 +36,141 @@
     <h1>Field Intelligence</h1>
     <span class="sub">Throne Room · scientific instrument surface</span>
     <span class="badge" id="mode-badge">OFFLINE</span>
+    <div class="row" style="margin-left:auto">
+      <label class="file">Load episode_trace.jsonl<input type="file" id="f-trace" accept=".jsonl,.json,text/plain" /></label>
+      <label class="file">Load memory.jsonl<input type="file" id="f-mem" accept=".jsonl,.json,text/plain" /></label>
+      <label class="file">Load decisions.jsonl<input type="file" id="f-dec" accept=".jsonl,.json,text/plain" /></label>
+      <label class="file">Load predictions.jsonl<input type="file" id="f-pred" accept=".jsonl,.json,text/plain" /></label>
+      <button type="button" id="btn-clear">Clear</button>
+    </div>
   </header>
   <main>
-    <section><h2>World Mirror</h2><div class="empty">No live snapshot. Bind SHARED_BODY / WorldMirror. Never displays simulated values as live.</div></section>
-    <section><h2>Memory</h2><div class="empty">Associative memory offline until experiences are appended.</div></section>
-    <section><h2>Decision Observatory</h2><div class="empty">Witness only. No admission authority.</div></section>
-    <section><h2>Counterfactual Lab</h2><div class="empty">Experiments are SIMULATION only. Live FieldTick is never mutated here.</div></section>
-    <section><h2>Research Desk</h2><div class="empty">Millennium Lab / workbench. Finite evidence is not unrestricted proof.</div></section>
-    <section><h2>Predictions</h2><div class="empty">Pending / matched / mismatched from PredictionStore.</div></section>
+    <section>
+      <h2>World Mirror / Trace</h2>
+      <div id="panel-trace" class="empty">No journals loaded. Run <code>python -m qwuack.runtime --ticks 3 --once</code> then load <code>episode_trace.jsonl</code> from the FI root (default <code>/tmp/metafield/field_intelligence</code>).</div>
+    </section>
+    <section>
+      <h2>Memory</h2>
+      <div id="panel-mem" class="empty">Associative memory offline until a journal is loaded.</div>
+    </section>
+    <section>
+      <h2>Decision Observatory</h2>
+      <div id="panel-dec" class="empty">Witness only. No admission authority.</div>
+    </section>
+    <section>
+      <h2>Predictions</h2>
+      <div id="panel-pred" class="empty">Pending / matched / mismatched from PredictionStore.</div>
+    </section>
+    <section>
+      <h2>Counterfactual Lab</h2>
+      <div class="empty">Experiments are <strong>SIMULATION</strong> only. Live FieldTick is never mutated here. Use <code>rt.fi.replay_episode()</code> / <code>alternative_action()</code> in Python; outcomes land under <code>counterfactual/</code>.</div>
+    </section>
+    <section>
+      <h2>Research Desk</h2>
+      <div class="empty">Millennium Lab / workbench. Finite computational evidence is not unrestricted formal proof.</div>
+    </section>
   </main>
   <footer>
-    <p>Offline-first shell. Does not invent metrics. Modes: LIVE · REPLAY · SIMULATION · FIXTURE · OFFLINE. See <code>docs/FIELD_INTELLIGENCE.md</code>.</p>
+    <p>Offline-first. Does not invent metrics or claim LIVE without evidence. Modes: LIVE · REPLAY · SIMULATION · FIXTURE · OFFLINE. See <code>docs/FIELD_INTELLIGENCE_LIVE_PATH.md</code>.</p>
   </footer>
+  <script>
+  (function () {
+    const badge = document.getElementById('mode-badge');
+    function parseJsonl(text) {
+      const rows = [];
+      for (const line of text.split(/\r?\n/)) {
+        const t = line.trim();
+        if (!t) continue;
+        try { rows.push(JSON.parse(t)); } catch (e) { /* skip */ }
+      }
+      return rows;
+    }
+    function setMode(mode) {
+      badge.textContent = mode;
+      badge.className = 'badge';
+      if (mode === 'FIXTURE') badge.classList.add('fixture');
+      else if (mode === 'LIVE') badge.classList.add('live');
+      else if (mode === 'SIMULATION') badge.classList.add('sim');
+    }
+    function esc(s) {
+      return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+    function loadFile(input, handler) {
+      input.addEventListener('change', async () => {
+        const f = input.files && input.files[0];
+        if (!f) return;
+        const text = await f.text();
+        handler(text, f.name);
+        input.value = '';
+      });
+    }
+    loadFile(document.getElementById('f-trace'), (text) => {
+      const rows = parseJsonl(text);
+      const el = document.getElementById('panel-trace');
+      if (!rows.length) { el.className = 'empty'; el.textContent = 'File had no JSONL rows.'; return; }
+      const modes = new Set(rows.map(r => r.mode).filter(Boolean));
+      if (modes.has('LIVE')) setMode('LIVE');
+      else if (modes.has('FIXTURE')) setMode('FIXTURE');
+      else setMode('REPLAY');
+      el.className = '';
+      el.innerHTML = '<div class="stat">steps: ' + rows.length + '</div>' +
+        '<ul class="compact">' + rows.slice(-12).map(r =>
+          '<li><span class="mono">#' + esc(r.sequence) +
+          ' body=' + esc(r.body_id) +
+          ' act=' + esc(r.action_type) +
+          ' adm=' + (r.accepted ? 'ok' : 'no') +
+          ' cons=' + esc(r.consequence) +
+          ' tick=' + esc(r.tick_sequence) +
+          (r.tick_hash ? ' hash=' + esc(String(r.tick_hash).slice(0, 8)) : '') +
+          '</span></li>').join('') + '</ul>';
+    });
+    loadFile(document.getElementById('f-mem'), (text) => {
+      const rows = parseJsonl(text);
+      const el = document.getElementById('panel-mem');
+      if (!rows.length) { el.className = 'empty'; el.textContent = 'No memory rows.'; return; }
+      const byType = {};
+      rows.forEach(r => { const t = r.memory_type || '?'; byType[t] = (byType[t] || 0) + 1; });
+      el.className = '';
+      el.innerHTML = '<div class="stat">' + Object.entries(byType).map(([k,v]) => k + '=' + v).join(' · ') + '</div>' +
+        '<ul class="compact">' + rows.slice(-10).map(r =>
+          '<li><span class="mono">' + esc(r.memory_type) + ' · ' + esc((r.content || '').slice(0, 100)) + '</span></li>'
+        ).join('') + '</ul>';
+    });
+    loadFile(document.getElementById('f-dec'), (text) => {
+      const rows = parseJsonl(text);
+      const el = document.getElementById('panel-dec');
+      if (!rows.length) { el.className = 'empty'; el.textContent = 'No decision rows.'; return; }
+      const accepted = rows.filter(r => r.admission_status === 'ACCEPTED').length;
+      const rejected = rows.filter(r => r.admission_status === 'REJECTED').length;
+      el.className = '';
+      el.innerHTML = '<div class="stat">total=' + rows.length + ' accepted=' + accepted + ' rejected=' + rejected + '</div>' +
+        '<ul class="compact">' + rows.slice(-8).map(r =>
+          '<li><span class="mono">' + esc(r.selection_mode) + ' → ' + esc(r.selected_candidate_id) +
+          ' · ' + esc(r.admission_status || 'pending') + '</span></li>'
+        ).join('') + '</ul>';
+    });
+    loadFile(document.getElementById('f-pred'), (text) => {
+      const rows = parseJsonl(text);
+      const el = document.getElementById('panel-pred');
+      if (!rows.length) { el.className = 'empty'; el.textContent = 'No predictions.'; return; }
+      const by = {};
+      rows.forEach(r => { const s = r.evaluation_status || 'PENDING'; by[s] = (by[s] || 0) + 1; });
+      el.className = '';
+      el.innerHTML = '<div class="stat">' + Object.entries(by).map(([k,v]) => k + '=' + v).join(' · ') + '</div>' +
+        '<ul class="compact">' + rows.slice(-8).map(r =>
+          '<li><span class="mono">' + esc(r.evaluation_status) + ' exp=' + esc(r.expected_outcome) +
+          ' act=' + esc(r.actual_outcome) + '</span></li>'
+        ).join('') + '</ul>';
+    });
+    document.getElementById('btn-clear').addEventListener('click', () => {
+      setMode('OFFLINE');
+      ['panel-trace','panel-mem','panel-dec','panel-pred'].forEach(id => {
+        const el = document.getElementById(id);
+        el.className = 'empty';
+        el.textContent = 'Cleared.';
+      });
+    });
+  })();
+  </script>
 </body>
 </html>

@@ -1,5 +1,5 @@
 """Field Intelligence v1 — World Mirror, Associative Memory, Counterfactual Lab,
-Decision Observatory, Prediction, Research bridge.
+Decision Observatory, Prediction, Research bridge, live-path pipeline.
 
 Additive layer on Throne Room. Does not own FieldTick, Operator ABI, or act.device.
 Qwuack remains a tenant. Duck Gate remains the admission boundary.
@@ -24,6 +24,7 @@ from agent.field_intelligence.decision_observatory import (
     DecisionRecord,
     SelectionMode,
 )
+from agent.field_intelligence.pipeline import FieldIntelligenceBridge, TraceStep
 from agent.field_intelligence.prediction import (
     Prediction,
     PredictionEvalStatus,
@@ -49,6 +50,7 @@ __all__ = [
     "Experiment",
     "ExperimentBranch",
     "ExperimentOutcome",
+    "FieldIntelligenceBridge",
     "MemoryRecord",
     "MemoryType",
     "OutcomeComparison",
@@ -56,6 +58,7 @@ __all__ = [
     "PredictionEvalStatus",
     "PredictionStore",
     "SelectionMode",
+    "TraceStep",
     "WorldChange",
     "WorldEntity",
     "WorldMirror",
@@ -63,4 +66,4 @@ __all__ = [
     "WorldSnapshot",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
