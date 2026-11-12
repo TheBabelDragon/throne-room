@@ -25,6 +25,8 @@ jobs:
         run: python -m unittest tests.test_qwuack_shared_body
       - name: Field Intelligence v1
         run: python -m unittest tests.test_field_intelligence
+      - name: Field Intelligence live path
+        run: python -m unittest tests.test_field_intelligence_live_path
       - name: Startup --full path check
         run: python -m unittest tests.test_startup_full_paths
       - name: Language arm harness
