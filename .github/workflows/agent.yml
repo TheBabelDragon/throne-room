@@ -11,10 +11,18 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
       - name: FieldTick / ABI / live-feed invariants
         run: python -m agent.test_invariants
+      - name: Arm / Torch language-arm invariants
+        run: python -m unittest tests.test_agent_arm_invariants
       - name: Qwuack tenant invariants
         run: python -m unittest tests.test_qwuack_identity tests.test_qwuack_policy tests.test_qwuack_runtime tests.test_qwuack_boundary tests.test_qwuack_state tests.test_duck_gate tests.test_eink_sink
+      - name: Qwuack SHARED_BODY perception and continuity
+        run: python -m unittest tests.test_qwuack_shared_body
       - name: Startup --full path check
         run: python -m unittest tests.test_startup_full_paths
       - name: Language arm harness

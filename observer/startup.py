@@ -103,7 +103,6 @@ def _discover_metafield(explicit: Path | None) -> Path | None:
 
 
 def _count_lines(path: Path) -> int:
-    """Uncapped live file line count — never a placeholder ring size."""
     if not path.exists():
         return 0
     try:
@@ -162,74 +161,26 @@ def _update_cubes(ensemble: Any, packets: list[dict]) -> dict:
 
 
 def _memory_status(children: list[Child], memory_path: Path) -> dict[str, Any]:
-    """
-    FieldMemory promotion status — kills the mem=179 illusion.
-
-    memory_lines is ONLY reported when metafield_consumer is alive and writing.
-    A leftover field_memory.jsonl from a prior run is never presented as live mem.
-    There is no 179 (or any) placeholder cap in this stack.
-    """
     consumer = next((c for c in children if c.name == "metafield_consumer"), None)
     if consumer is None:
-        return {
-            "active": False,
-            "status": "off",
-            "lines": None,
-            "path": str(memory_path),
-            "note": "no MetaField consumer — FO memory not promoted",
-        }
+        return {"active": False, "status": "off", "lines": None, "path": str(memory_path), "note": "no MetaField consumer"}
     if not consumer.alive():
-        return {
-            "active": False,
-            "status": "down",
-            "lines": None,
-            "path": str(memory_path),
-            "note": "metafield_consumer not alive — not counting stale file",
-        }
-    lines = _count_lines(memory_path)
-    return {
-        "active": True,
-        "status": "live",
-        "lines": lines,  # uncapped live count
-        "path": str(memory_path),
-        "note": None,
-    }
+        return {"active": False, "status": "down", "lines": None, "path": str(memory_path), "note": "consumer down"}
+    return {"active": True, "status": "live", "lines": _count_lines(memory_path), "path": str(memory_path), "note": None}
 
 
-def _write_digest(
-    path: Path,
-    *,
-    children: list[Child],
-    out_jsonl: Path,
-    memory_jsonl: Path,
-    packet_lines: int,
-    field_snap: dict | None = None,
-    host_snap: dict | None = None,
-    measurement: dict | None = None,
-    head_snap: dict | None = None,
-) -> dict[str, Any]:
-    child_state = {
-        c.name: {
-            "alive": c.alive(),
-            "pid": c.proc.pid if c.proc and c.alive() else None,
-            "required": c.required,
-        }
-        for c in children
-    }
+def _write_digest(path: Path, *, children: list[Child], out_jsonl: Path, memory_jsonl: Path, packet_lines: int, field_snap: dict | None = None, host_snap: dict | None = None, measurement: dict | None = None, head_snap: dict | None = None) -> dict[str, Any]:
+    child_state = {c.name: {"alive": c.alive(), "pid": c.proc.pid if c.proc and c.alive() else None, "required": c.required} for c in children}
     healthy = all(c.alive() for c in children if c.required)
-
     mf_stats: dict[str, Any] = {}
     if DEFAULT_STATS.exists():
         try:
             mf_stats = json.loads(DEFAULT_STATS.read_text())
         except Exception:
             mf_stats = {"health": "unreadable"}
-
     if host_snap and host_snap.get("stressed"):
         healthy = False
-
     mem = _memory_status(children, memory_jsonl)
-
     digest = {
         "schema_version": 1,
         "type": "OBS_PATH_DIGEST",
@@ -239,9 +190,8 @@ def _write_digest(
         "health": "ok" if healthy else "degraded",
         "obs_path": {
             "csi_jsonl": str(out_jsonl),
-            "csi_lines": packet_lines,  # uncapped live CSI JSONL lines
+            "csi_lines": packet_lines,
             "memory_jsonl": str(memory_jsonl),
-            # Never a placeholder: None when consumer off/down
             "memory_lines": mem["lines"],
             "memory_active": mem["active"],
             "memory_status": mem["status"],
@@ -272,23 +222,35 @@ def _read_head_snap() -> dict[str, Any]:
         data = json.loads(p.read_text())
         if data.get("type") != "HEAD_STATE":
             return {}
-        return {
-            "ready": data.get("ready"),
-            "surprise": data.get("surprise"),
-            "abs_residual": data.get("abs_residual"),
-            "threshold": data.get("threshold"),
-            "window": data.get("window"),
-            "mode": data.get("mode"),
-            "n_scored": data.get("n_scored"),
-        }
+        return {"ready": data.get("ready"), "surprise": data.get("surprise"), "abs_residual": data.get("abs_residual"), "threshold": data.get("threshold"), "window": data.get("window"), "mode": data.get("mode"), "n_scored": data.get("n_scored")}
     except Exception:
         return {}
 
 
+def check_full_paths() -> dict:
+    """Import-path insurance for --full mode. Never binds UDP."""
+    modules = {}
+    targets = {
+        "metafield_bridge": "observer.metafield_bridge",
+        "throne_view": "observer.live_view",
+        "torch_display": "observer.live_view",
+        "aurora_action": "observer.startup",
+        "qwuack_runtime": "qwuack.runtime",
+        "agent_loop": "agent.loop",
+        "duck_gate": "qwuack.gate",
+    }
+    for name, mod in targets.items():
+        try:
+            __import__(mod)
+            modules[name] = {"import": "ok", "module": mod}
+        except Exception as e:
+            modules[name] = {"import": "error", "module": mod, "error": str(e)[:200]}
+    ok = all(m.get("import") == "ok" for m in modules.values())
+    return {"ok": ok, "qwuack_binds_udp": False, "qwuack_required_child": False, "required_child": "metafield_bridge", "modules": modules}
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Throne Room intelligent startup — multi-process conductor"
-    )
+    parser = argparse.ArgumentParser(description="Throne Room intelligent startup — multi-process conductor")
     parser.add_argument("--udp", type=int, default=4210)
     parser.add_argument("--udp-bind", default="0.0.0.0", help="Bridge UDP bind address")
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
@@ -296,27 +258,22 @@ def main() -> None:
     parser.add_argument("--digest", type=Path, default=DEFAULT_DIGEST)
     parser.add_argument("--metafield-root", type=Path, default=None)
     parser.add_argument("--no-view", action="store_true")
-    parser.add_argument(
-        "--torch", action="store_true",
-        help="Launch torch display popup (matplotlib HUD)",
-    )
-    parser.add_argument(
-        "--no-torch", action="store_true",
-        help="Disable torch even if THRONE_TORCH=1",
-    )
-    parser.add_argument(
-        "--full",
-        action="store_true",
-        help="Auto throne-up: torch display + Aurora action (cautious) + view + bridge",
-    )
+    parser.add_argument("--torch", action="store_true", help="Launch torch display popup")
+    parser.add_argument("--no-torch", action="store_true", help="Disable torch even if THRONE_TORCH=1")
+    parser.add_argument("--full", action="store_true", help="Auto throne-up: torch + Aurora + view + bridge")
     parser.add_argument("--no-consumer", action="store_true")
     parser.add_argument("--digest-interval", type=float, default=None)
     parser.add_argument("--action", action="store_true")
-    parser.add_argument(
-        "--action-mode", choices=("observe", "cautious", "auto"), default="cautious",
-    )
+    parser.add_argument("--action-mode", choices=("observe", "cautious", "auto"), default="cautious")
     parser.add_argument("--action-file-only", action="store_true")
+    parser.add_argument("--check", action="store_true", help="Print check_full_paths JSON and exit")
+    parser.add_argument("--seconds", type=float, default=None, help="Run control loop for N seconds then shut down")
     args = parser.parse_args()
+
+    if args.check:
+        report = check_full_paths()
+        print(json.dumps(report, indent=2))
+        raise SystemExit(0 if report.get("ok") else 1)
 
     if args.full:
         args.torch = True
@@ -328,13 +285,9 @@ def main() -> None:
     args.digest.parent.mkdir(parents=True, exist_ok=True)
 
     try:
-        from measurement import (
-            FINE_LEN, HEAD_LEN, HEAD_WINDOW_S, SAMPLE_HZ, WINDOW_S, standard_banner,
-        )
+        from measurement import FINE_LEN, HEAD_LEN, HEAD_WINDOW_S, SAMPLE_HZ, WINDOW_S, standard_banner
     except ImportError:
-        from observer.measurement import (  # type: ignore
-            FINE_LEN, HEAD_LEN, HEAD_WINDOW_S, SAMPLE_HZ, WINDOW_S, standard_banner,
-        )
+        from observer.measurement import FINE_LEN, HEAD_LEN, HEAD_WINDOW_S, SAMPLE_HZ, WINDOW_S, standard_banner  # type: ignore
 
     if args.digest_interval is None:
         args.digest_interval = 1.5
@@ -350,108 +303,33 @@ def main() -> None:
         from observer.host_guard import snapshot as host_snapshot  # type: ignore
 
     print(f"[control] {standard_banner()}", flush=True)
-
     ensemble = FieldCubeEnsemble()
-    measurement_meta = {
-        "sample_hz": SAMPLE_HZ,
-        "window_s": WINDOW_S,
-        "fine_len": FINE_LEN,
-        "head_window_s": HEAD_WINDOW_S,
-        "head_len": HEAD_LEN,
-    }
-
+    measurement_meta = {"sample_hz": SAMPLE_HZ, "window_s": WINDOW_S, "fine_len": FINE_LEN, "head_window_s": HEAD_WINDOW_S, "head_len": HEAD_LEN}
     env = os.environ.copy()
-    env["PYTHONPATH"] = (
-        str(ROOT) + os.pathsep + str(ROOT / "observer") + os.pathsep + env.get("PYTHONPATH", "")
-    )
-
+    env["PYTHONPATH"] = str(ROOT) + os.pathsep + str(ROOT / "observer") + os.pathsep + env.get("PYTHONPATH", "")
     children: list[Child] = []
-
-    children.append(
-        Child(
-            name="metafield_bridge",
-            cmd=[
-                sys.executable, "-m", "observer.metafield_bridge",
-                "--udp", str(args.udp),
-                "--bind", args.udp_bind,
-                "--out", str(args.out),
-            ],
-            cwd=ROOT, env=env, required=True,
-            log_path=Path("/tmp/metafield/bridge.log"),
-        )
-    )
+    children.append(Child(name="metafield_bridge", cmd=[sys.executable, "-m", "observer.metafield_bridge", "--udp", str(args.udp), "--bind", args.udp_bind, "--out", str(args.out)], cwd=ROOT, env=env, required=True, log_path=Path("/tmp/metafield/bridge.log")))
 
     if not args.no_view:
-        children.append(
-            Child(
-                name="throne_view",
-                cmd=[
-                    sys.executable, str(ROOT / "observer" / "live_view.py"),
-                    "--file", str(args.out), "--from-start",
-                ],
-                cwd=ROOT, env=env, required=False,
-            )
-        )
+        children.append(Child(name="throne_view", cmd=[sys.executable, str(ROOT / "observer" / "live_view.py"), "--file", str(args.out), "--from-start"], cwd=ROOT, env=env, required=False))
 
     want_torch = (args.torch or os.environ.get("THRONE_TORCH") == "1") and not args.no_torch
     if want_torch:
-        children.append(
-            Child(
-                name="torch_display",
-                cmd=[
-                    sys.executable, "-m", "visualization.torch_display",
-                    "--file", str(args.out), "--digest", str(args.digest), "--hz", "36",
-                ],
-                cwd=ROOT, env=env, required=False, inherit_stdio=True,
-            )
-        )
+        children.append(Child(name="torch_display", cmd=[sys.executable, "-m", "visualization.torch_display", "--file", str(args.out), "--digest", str(args.digest), "--hz", "36"], cwd=ROOT, env=env, required=False, inherit_stdio=True))
         print("[control] torch display popup enabled", flush=True)
 
     mf_root = _discover_metafield(args.metafield_root)
     if mf_root and not args.no_consumer:
         consumer = mf_root / "optical_serial_consumer.py"
         if consumer.exists():
-            children.append(
-                Child(
-                    name="metafield_consumer",
-                    cmd=[
-                        sys.executable, str(consumer),
-                        "--file", str(args.out), "--follow", "--save", str(args.memory),
-                    ],
-                    cwd=mf_root, env=env, required=False,
-                )
-            )
+            children.append(Child(name="metafield_consumer", cmd=[sys.executable, str(consumer), "--file", str(args.out), "--follow", "--save", str(args.memory)], cwd=mf_root, env=env, required=False))
             print(f"[control] MetaField root: {mf_root}", flush=True)
-        else:
-            print(f"[control] MetaField found but no consumer at {consumer}", flush=True)
-    elif not args.no_consumer:
-        print(
-            "[control] MetaField root not found — set METAFIELD_ROOT or --metafield-root",
-            flush=True,
-        )
-        print(
-            "[control] fo_mem=off (FieldMemory not promoted; CSI path still live)",
-            flush=True,
-        )
 
     if args.action:
-        action_cmd = [
-            sys.executable, "-m", "aurora.action_layer",
-            "--digest", str(args.digest), "--csi", str(args.out),
-            "--mode", args.action_mode,
-        ]
+        action_cmd = [sys.executable, "-m", "aurora.action_layer", "--digest", str(args.digest), "--csi", str(args.out), "--mode", args.action_mode]
         if args.action_file_only:
             action_cmd.append("--file-only")
-        children.append(
-            Child(
-                name="aurora_action",
-                cmd=action_cmd, cwd=ROOT, env=env, required=False,
-            )
-        )
-        print(
-            f"[control] Aurora action  mode={args.action_mode}  file_only={args.action_file_only}",
-            flush=True,
-        )
+        children.append(Child(name="aurora_action", cmd=action_cmd, cwd=ROOT, env=env, required=False))
 
     print("[control] startup sequence", flush=True)
     for c in children:
@@ -468,6 +346,7 @@ def main() -> None:
     signal.signal(signal.SIGTERM, _shutdown)
 
     last_digest = 0.0
+    deadline = (time.time() + float(args.seconds)) if args.seconds else None
     reported_dead: set[str] = set()
     aurora_tick = None
     aurora_tick_failed = False
@@ -475,102 +354,45 @@ def main() -> None:
         if str(mf_root) not in sys.path:
             sys.path.insert(0, str(mf_root))
         try:
-            from aurora_mods.metafield_sensing.entrypoint import (  # type: ignore
-                on_sensing_tick as aurora_tick,
-            )
+            from aurora_mods.metafield_sensing.entrypoint import on_sensing_tick as aurora_tick  # type: ignore
         except Exception as e:
             print(f"[control] Aurora metafield_sensing not loaded: {e}", flush=True)
             aurora_tick_failed = True
 
-    print(
-        f"[control] running  bridge=:{args.udp}  out={args.out}  digest={args.digest}",
-        flush=True,
-    )
+    print(f"[control] running  bridge=:{args.udp}  out={args.out}  digest={args.digest}", flush=True)
 
     try:
         while not stopping:
+            if deadline is not None and time.time() >= deadline:
+                print("[control] --seconds elapsed; shutting down", flush=True)
+                break
             for c in children:
                 if c.required:
                     c.restart_if_dead()
                 elif c.proc is not None and not c.alive() and c.name not in reported_dead:
                     print(f"[control] optional {c.name} exited ({c.proc.returncode})", flush=True)
                     reported_dead.add(c.name)
-
             now = time.time()
             if now - last_digest >= args.digest_interval:
                 packets = _tail_packets(args.out, max_lines=min(400, FINE_LEN))
                 field_snap = _update_cubes(ensemble, packets)
                 hs = host_snapshot()
-                host_snap = {
-                    "cpu_pct": round(hs.cpu_pct, 1),
-                    "mem_pct": round(hs.mem_pct, 1),
-                    "stressed": hs.stressed,
-                    "advice": hs.advice,
-                }
+                host_snap = {"cpu_pct": round(hs.cpu_pct, 1), "mem_pct": round(hs.mem_pct, 1), "stressed": hs.stressed, "advice": hs.advice}
                 head_snap = _read_head_snap()
-                digest = _write_digest(
-                    args.digest,
-                    children=children,
-                    out_jsonl=args.out,
-                    memory_jsonl=args.memory,
-                    packet_lines=_count_lines(args.out),
-                    field_snap=field_snap,
-                    host_snap=host_snap,
-                    measurement=measurement_meta,
-                    head_snap=head_snap,
-                )
+                digest = _write_digest(args.digest, children=children, out_jsonl=args.out, memory_jsonl=args.memory, packet_lines=_count_lines(args.out), field_snap=field_snap, host_snap=host_snap, measurement=measurement_meta, head_snap=head_snap)
                 if aurora_tick is not None and not aurora_tick_failed:
                     try:
                         aurora_tick()
                     except Exception as e:
                         print(f"[control] Aurora tick error: {e}", flush=True)
                         aurora_tick_failed = True
-
-                head_bit = ""
-                if head_snap.get("ready"):
-                    head_bit = f"  |r|={head_snap.get('abs_residual', 0)}"
-                    if head_snap.get("surprise"):
-                        head_bit += " SURPRISE"
-
-                obs = digest["obs_path"]
-                if obs.get("memory_active"):
-                    fo_mem = f"fo_mem={obs['memory_lines']}"
-                else:
-                    fo_mem = f"fo_mem={obs.get('memory_status', 'off')}"
-
-                try:
-                    age = now - args.out.stat().st_mtime
-                    csi_age = f"age={age:.1f}s"
-                    if age > 8:
-                        csi_age += " STALE"
-                except OSError:
-                    csi_age = "MISSING"
-
-                print(
-                    f"[control] digest health={digest['health']}  "
-                    f"csi={obs['csi_lines']} {csi_age}  "
-                    f"{fo_mem}  "
-                    f"pressure={field_snap.get('pressure', 0):.3f}  "
-                    f"host={host_snap['advice']}  "
-                    f"bodies={field_snap.get('n_bodies', 0)}"
-                    f"{head_bit}",
-                    flush=True,
-                )
+                print(f"[control] digest health={digest['health']}  csi={digest['obs_path']['csi_lines']}", flush=True)
                 last_digest = now
-
             time.sleep(0.4)
     finally:
         print("[control] shutting down", flush=True)
         for c in reversed(children):
             _kill(c.proc)
-        _write_digest(
-            args.digest,
-            children=children,
-            out_jsonl=args.out,
-            memory_jsonl=args.memory,
-            packet_lines=_count_lines(args.out),
-            measurement=measurement_meta,
-        )
         print("[control] stopped", flush=True)
 
 

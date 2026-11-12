@@ -68,10 +68,12 @@ class Runtime:
         world: World | None = None,
         identity: QwuackIdentity = QWUACK,
         status_path: Path | None = STATUS_PATH,
+        state_path: Path | None = None,
     ) -> None:
         self.world = world or World()
         self.identity = identity
         self.status_path = status_path
+        self.state_path = state_path
         self.status = Status(habitat=identity.habitat)
         self.last_turn: Turn | None = None
         self.awake = False
@@ -237,6 +239,46 @@ class Runtime:
         return self.cycle(obs)
 
     def _emit_status(self) -> None:
+        state_payload = None
+        try:
+            from qwuack.state import STATE_SCHEMA, QwuackState
+            admission = "WAIT"
+            last_action = ""
+            proposal_id = None
+            if self.last_turn is not None:
+                last_action = self.last_turn.proposal.action_type
+                proposal_id = self.last_turn.proposal.proposal_id
+                decision = getattr(self.last_turn, "decision", None)
+                if decision is not None:
+                    admission = getattr(decision, "status", None) or (
+                        "ADMITTED" if getattr(decision, "accepted", False) else "REJECTED"
+                    )
+            snap = QwuackState(
+                awake=self.awake,
+                last_action=last_action,
+                admission_status=str(admission),
+            )
+            state_payload = {
+                "schema": STATE_SCHEMA,
+                "awake": snap.awake,
+                "last_action": snap.last_action,
+                "admission_status": snap.admission_status,
+                "identity": {
+                    "name": self.identity.name,
+                    "species": self.identity.species,
+                    "habitat": self.identity.habitat,
+                    "role": self.identity.role,
+                    "agent_id": self.identity.agent_id,
+                },
+                "budget": {},
+                "proposal_id": proposal_id,
+            }
+            if self.state_path is not None:
+                self.state_path.parent.mkdir(parents=True, exist_ok=True)
+                self.state_path.write_text(json.dumps(state_payload, indent=2), encoding="utf-8")
+        except Exception:
+            state_payload = None
+
         if self.status_path is None:
             return
         try:
@@ -254,6 +296,8 @@ class Runtime:
                 },
                 "capabilities": sorted(self.identity.permitted_capabilities()),
             }
+            if state_payload is not None:
+                payload["qwuack_state"] = state_payload
             self.status_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         except OSError:
             return

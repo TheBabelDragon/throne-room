@@ -172,7 +172,9 @@ def run(
     trajectories: Path | None = None,
 ) -> dict:
     tok = ArmTokenizer()
-    model = DecoderTransformer(tok.vocab_size, seed=seed)
+    # Numpy train_epoch updates w_act (pre_attention features).
+    # Evaluate must use the same path or hold_acc measures an untrained head.
+    model = DecoderTransformer(tok.vocab_size, seed=seed, action_path="pre_attention")
     data = synthesize(examples, tokenizer=tok)
     traj_path = None
     if trajectories is not None:
