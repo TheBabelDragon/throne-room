@@ -16,6 +16,8 @@ from agent.language.tokenizer import ArmTokenizer, SPECIALS
 from agent.language.transformer import DecoderTransformer
 from agent.loop import World
 from agent.operator_abi import make_proposal
+from agent.schemas import Channel
+
 
 class ArmTests(unittest.TestCase):
     def test_tokenizer_owns_specials_and_roundtrip(self) -> None:
@@ -56,11 +58,11 @@ class ArmTests(unittest.TestCase):
     def test_arm_teacher_probe_still_commits(self) -> None:
         world = World()
         world.step()
-        e0 = world.scheduler.field.sum(__import__("agent.schemas", fromlist=["Channel"]).Channel.Energy)
+        e0 = world.scheduler.field.sum(Channel.Energy)
         turn = world.handle_human("Probe the energy peak")
         assert turn is not None
         self.assertEqual(turn.proposal.action_type, "PROBE")
-        self.assertGreater(world.scheduler.field.sum(__import__("agent.schemas", fromlist=["Channel"]).Channel.Energy), e0)
+        self.assertGreater(world.scheduler.field.sum(Channel.Energy), e0)
 
     def test_encode_target_is_structured(self) -> None:
         tok = ArmTokenizer()
@@ -87,8 +89,8 @@ class ArmTests(unittest.TestCase):
     def test_dataset_covers_all_actions(self) -> None:
         from agent.language.dataset import SCRIPTS, synthesize
         from agent.language.transformer import ACTION_ORDER
-        labeled = {[ex.action for ex in synthesize(len(SCRIPTS), tokenizer=ArmTokenizer())]}
-        self.assertTrue(set(ACTION_ORDER).issubset(labeled))
+        labeled = {ex.action for ex in synthesize(len(SCRIPTS), tokenizer=ArmTokenizer())}
+        self.assertTrue(set(ACTION_ORDER).issubset(labeled), labeled)
 
     def test_train_runtime_improves_action_head(self) -> None:
         from agent.language.train import run
