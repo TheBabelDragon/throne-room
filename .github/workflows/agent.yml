@@ -13,6 +13,8 @@ jobs:
           python-version: "3.11"
       - name: FieldTick / ABI / live-feed invariants
         run: python -m agent.test_invariants
+      - name: Arm / Torch language-arm invariants
+        run: python -m unittest tests.test_agent_arm_invariants
       - name: Qwuack tenant invariants
         run: python -m unittest tests.test_qwuack_identity tests.test_qwuack_policy tests.test_qwuack_runtime tests.test_qwuack_boundary tests.test_qwuack_state tests.test_duck_gate tests.test_eink_sink
       - name: Qwuack SHARED_BODY perception and continuity
