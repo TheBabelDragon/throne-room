@@ -1,1 +1,85 @@
-"""Optional conductor-side hook for SHARED_BODY.\n\nSafe to call from observer.startup digest loop.\nNever opens UDP. Never raises into the control loop.\n"""\n\nfrom __future__ import annotations\n\nfrom pathlib import Path\nfrom typing import Any\n\n_registry = None\n\n\ndef get_registry():\n    global _registry\n    if _registry is None:\n        try:\n            from .registry import SharedBodyRegistry\n\n            _registry = SharedBodyRegistry(auto_persist=True)\n        except Exception:\n            _registry = None\n    return _registry\n\n\ndef on_digest_tick(\n    packets: list[dict[str, Any]],\n    field_snap: dict[str, Any] | None = None,\n    head_snap: dict[str, Any] | None = None,\n) -> dict[str, Any]:\n    \"\"\"Ingest recent FO packets into the SHARED_BODY registry.\n\n    Returns a small status dict for the digest (never raises).\n    \"\"\"\n    status: dict[str, Any] = {\n        \"shared_body\": \"off\",\n        \"ingested\": 0,\n        \"rejected\": 0,\n        \"n_bodies\": 0,\n    }\n    try:\n        from .adapter import ingest_packet\n        from .export import snapshot_to_reverie\n\n        reg = get_registry()\n        if reg is None:\n            return status\n\n        ingested = 0\n        rejected = 0\n        for pkt in packets:\n            if not isinstance(pkt, dict):\n                continue\n            body, reason = ingest_packet(\n                pkt,\n                reg,\n                field_snap=field_snap,\n                head_snap=head_snap,\n            )\n            if body is not None and reason == \"ok\":\n                ingested += 1\n            else:\n                rejected += 1\n\n        try:\n            snapshot_to_reverie(registry=reg)\n        except Exception:\n            pass\n\n        counts = reg.counts()\n        status.update(\n            {\n                \"shared_body\": \"live\",\n                \"ingested\": ingested,\n                \"rejected\": rejected,\n                \"n_bodies\": counts.get(\"total\", 0),\n                \"alive\": counts.get(\"alive\", 0),\n                \"stale\": counts.get(\"stale\", 0),\n                \"timeout\": counts.get(\"timeout\", 0),\n            }\n        )\n    except Exception as e:\n        status[\"shared_body\"] = \"error\"\n        status[\"error\"] = str(e)[:200]\n    return status\n
+"""Optional conductor-side hook for SHARED_BODY.
+
+Safe to call from observer.startup digest loop.
+Never opens UDP. Never raises into the control loop.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+_registry = None
+
+
+def get_registry():
+    global _registry
+    if _registry is None:
+        try:
+            from .registry import SharedBodyRegistry
+
+            _registry = SharedBodyRegistry(auto_persist=True)
+        except Exception:
+            _registry = None
+    return _registry
+
+
+def on_digest_tick(
+    packets: list[dict[str, Any]],
+    field_snap: dict[str, Any] | None = None,
+    head_snap: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Ingest recent FO packets into the SHARED_BODY registry.
+
+    Returns a small status dict for the digest (never raises).
+    """
+    status: dict[str, Any] = {
+        "shared_body": "off",
+        "ingested": 0,
+        "rejected": 0,
+        "n_bodies": 0,
+    }
+    try:
+        from .adapter import ingest_packet
+        from .export import snapshot_to_reverie
+
+        reg = get_registry()
+        if reg is None:
+            return status
+
+        ingested = 0
+        rejected = 0
+        for pkt in packets:
+            if not isinstance(pkt, dict):
+                continue
+            body, reason = ingest_packet(
+                pkt,
+                reg,
+                field_snap=field_snap,
+                head_snap=head_snap,
+            )
+            if body is not None and reason == "ok":
+                ingested += 1
+            else:
+                rejected += 1
+
+        try:
+            snapshot_to_reverie(registry=reg)
+        except Exception:
+            pass
+
+        counts = reg.counts()
+        status.update(
+            {
+                "shared_body": "live",
+                "ingested": ingested,
+                "rejected": rejected,
+                "n_bodies": counts.get("total", 0),
+                "alive": counts.get("alive", 0),
+                "stale": counts.get("stale", 0),
+                "timeout": counts.get("timeout", 0),
+            }
+        )
+    except Exception as e:
+        status["shared_body"] = "error"
+        status["error"] = str(e)[:200]
+    return status
