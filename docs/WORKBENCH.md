@@ -51,3 +51,14 @@ Journals under `/tmp/metafield/`:
 | `duck_objects.jsonl` | append-only object log |
 | `duck_ids.json` | ID counters |
 | `duck_sessions.jsonl` | session census |
+
+## QUANTUM / RIEMANN POND
+
+Ingests `spectral_experiment.v1` records from Signal Processor.
+
+```bash
+python -c "from qwuack.workbench.spectral_pond import demo_roundtrip; print(demo_roundtrip())"
+python -m unittest tests.test_spectral_import
+```
+
+See [SPECTRAL_EXPERIMENT.md](SPECTRAL_EXPERIMENT.md).
