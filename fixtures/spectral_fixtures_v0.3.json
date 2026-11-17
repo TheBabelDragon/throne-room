@@ -1,0 +1,17 @@
+{
+  "fixture_set_version": "spectral-fixtures.v0.3",
+  "description": "Shared numerical fixtures for Spectral Bridge v0.3",
+  "points": [
+    {"fixture_id": "known_zero_01", "kind": "known_zero", "t": 14.134725141734693, "index": 1, "precision_dps": 30, "domain": "critical_line", "classification": "known_zero", "acceptance": {"reference_abs_Z_max": 1e-10, "ordinate_abs_error_max": 0.05}, "provenance": "Odlyzko / mpmath.zetazero"},
+    {"fixture_id": "known_zero_02", "kind": "known_zero", "t": 21.022039638771556, "index": 2, "precision_dps": 30, "domain": "critical_line", "classification": "known_zero", "acceptance": {"reference_abs_Z_max": 1e-10, "ordinate_abs_error_max": 0.05}, "provenance": "Odlyzko / mpmath.zetazero"},
+    {"fixture_id": "known_zero_03", "kind": "known_zero", "t": 25.01085758014569, "index": 3, "precision_dps": 30, "domain": "critical_line", "classification": "known_zero", "acceptance": {"reference_abs_Z_max": 1e-10, "ordinate_abs_error_max": 0.05}, "provenance": "Odlyzko / mpmath.zetazero"},
+    {"fixture_id": "known_zero_04", "kind": "known_zero", "t": 30.424876125859513, "index": 4, "precision_dps": 30, "domain": "critical_line", "classification": "known_zero", "acceptance": {"reference_abs_Z_max": 1e-10, "ordinate_abs_error_max": 0.05}, "provenance": "Odlyzko / mpmath.zetazero"},
+    {"fixture_id": "known_zero_05", "kind": "known_zero", "t": 32.93506158773919, "index": 5, "precision_dps": 30, "domain": "critical_line", "classification": "known_zero", "acceptance": {"reference_abs_Z_max": 1e-10, "ordinate_abs_error_max": 0.05}, "provenance": "Odlyzko / mpmath.zetazero"},
+    {"fixture_id": "nonzero_01", "kind": "nonzero_point", "t": 15.0, "precision_dps": 25, "domain": "critical_line", "classification": "nonzero_point", "acceptance": {"relative_residual_max": 0.05}, "provenance": "synthetic ordinate"},
+    {"fixture_id": "nonzero_02", "kind": "nonzero_point", "t": 20.0, "precision_dps": 25, "domain": "critical_line", "classification": "nonzero_point", "acceptance": {"relative_residual_max": 0.05}, "provenance": "synthetic ordinate"},
+    {"fixture_id": "nonzero_03", "kind": "nonzero_point", "t": 26.0, "precision_dps": 25, "domain": "critical_line", "classification": "nonzero_point", "acceptance": {"relative_residual_max": 0.05}, "provenance": "synthetic ordinate"},
+    {"fixture_id": "nonzero_04", "kind": "nonzero_point", "t": 35.0, "precision_dps": 25, "domain": "critical_line", "classification": "nonzero_point", "acceptance": {"relative_residual_max": 0.05}, "provenance": "synthetic ordinate"},
+    {"fixture_id": "nonzero_05", "kind": "nonzero_point", "t": 50.0, "precision_dps": 25, "domain": "critical_line", "classification": "nonzero_point", "acceptance": {"relative_residual_max": 0.05}, "provenance": "synthetic ordinate"},
+    {"fixture_id": "nonzero_06", "kind": "nonzero_point", "t": 100.0, "precision_dps": 25, "domain": "critical_line", "classification": "nonzero_point", "acceptance": {"relative_residual_max": 0.05}, "provenance": "synthetic ordinate"}
+  ]
+}
