@@ -42,3 +42,12 @@ Burn-in completion does **not** imply equilibration.
 | Single volume | Uniform bound | No |
 | Statistical fit | Theorem | No |
 | Formal certificate + checker PASS | FORMALLY_VERIFIED | Yes |
+
+
+## Active pond path (v0.2)
+
+1. `yang_mills_experiment` emits prize rejection, U(1) legacy, SU(2) finite evidence.
+2. ProofKiller admits finite SU(2) as VERIFIED/PROGRESS computational evidence.
+3. ProofKiller rejects U(1)-as-non-Abelian, finite-as-continuum, gap-proxy-as-proof.
+4. Workbench `proof()` for Yang_Mills mints RESULT (computational_evidence) + REJECTED promotion claims — never proof-bearing lemmas from numerics alone.
+5. Formal PASS requires a real certificate; placeholders are not certificates.
