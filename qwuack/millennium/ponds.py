@@ -80,23 +80,9 @@ def rh_experiment(generation, rng):
 
 
 def yang_mills_experiment(generation, rng):
-    out = [_prize("yang_mills", "continuum quantum Yang-Mills has a mass gap", generation)]
-    L, beta, seed = 4 + generation % 3, 0.8, 1000 + generation
-    local = random.Random(seed)
-    plaquettes = [math.cos(local.uniform(-math.pi, math.pi) / (1 + beta)) for _ in range(L * L)]
-    mean_p = sum(plaquettes) / len(plaquettes)
-    c1 = sum(plaquettes[i] * plaquettes[(i + 1) % len(plaquettes)] for i in range(len(plaquettes))) / len(plaquettes)
-    c2 = sum(plaquettes[i] * plaquettes[(i + 2) % len(plaquettes)] for i in range(len(plaquettes))) / len(plaquettes)
-    gap = max(0.0, math.log(max(abs(c1), 1e-9) / max(abs(c2), 1e-9)))
-    out.append(_art("yang_mills", ArtifactKind.EVIDENCE, "u1_lattice_gap_proxy",
-                    f"U(1) Wilson toy L={L} beta={beta} seed={seed} gap_proxy={gap:.4g}",
-                    "VERIFIED" if gap > 0 else "PROGRESS", generation,
-                    {"named": True, "L": L, "beta": beta, "seed": seed, "mean_plaquette": mean_p,
-                     "c1": c1, "c2": c2, "gap_proxy": gap, "family": "u1_wilson_finite"}))
-    out.append(_art("yang_mills", ArtifactKind.TRANSFORM, "wilson_plaquette",
-                    "Wilson plaquette is the finite lattice observable; continuum limit is not admitted",
-                    "PROGRESS", generation, {"named": True, "L": L, "beta": beta}))
-    return out
+    """Delegate to GaugeGap SU(2) active path + U(1) legacy baseline."""
+    from qwuack.millennium.yang_mills_pond import yang_mills_experiment as _ym
+    return _ym(generation, rng)
 
 
 def _burgers(u, nu, dt, dx):
@@ -252,7 +238,7 @@ def connection_artifacts(generation, produced):
 
 POND_TABLE = (
     Pond("rh", "Riemann hypothesis", "open", "named critical-line windows", rh_experiment),
-    Pond("yang_mills", "Yang–Mills existence and mass gap", "open", "finite U(1) Wilson lattices", yang_mills_experiment),
+    Pond("yang_mills", "Yang–Mills existence and mass gap", "open", "SU(2) finite Wilson lattices + U(1) legacy baseline", yang_mills_experiment),
     Pond("navier_stokes", "Navier–Stokes existence and smoothness", "open", "named viscous Burgers windows", navier_stokes_experiment),
     Pond("bsd", "Birch and Swinnerton-Dyer", "open", "named elliptic curves, box search", bsd_experiment),
     Pond("hodge", "Hodge conjecture", "open", "named simplicial complexes", hodge_experiment),
