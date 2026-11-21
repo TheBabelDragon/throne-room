@@ -137,6 +137,8 @@ class Workbench:
             if o.kind in {ObjectKind.EXPERIMENT, ObjectKind.LEMMA}
             and o.status == ClaimStatus.COMPUTATIONAL_EVIDENCE
         ]
+        ym = self.spec.key == "Yang_Mills"
+
         for ev in evidence[-3:]:
             if shortcut_forbidden(self.spec, "finite_numerical_verification") and ev.kind == ObjectKind.EXPERIMENT:
                 out.append(self.store.mint(
@@ -151,6 +153,67 @@ class Workbench:
                     verification={"numerical": "PASS", "formal": "NOT_VERIFIED"},
                 ))
                 continue
+
+            if ym:
+                notes = [
+                    "finite_lattice_hypothesis",
+                    "NOT A PROOF",
+                    "computational_evidence_only",
+                ]
+                if shortcut_forbidden(self.spec, "numerical_gap_proxy_as_proof"):
+                    notes.append("forbidden_shortcut:numerical_gap_proxy_as_proof")
+                if shortcut_forbidden(self.spec, "finite_lattice_as_continuum"):
+                    notes.append("forbidden_shortcut:finite_lattice_as_continuum")
+
+                out.append(self.store.mint(
+                    ObjectKind.RESULT,
+                    f"finite observation from {ev.id}: {ev.statement}",
+                    problem=self.spec.id,
+                    status=ClaimStatus.COMPUTATIONAL_EVIDENCE,
+                    derived_from=[ev.id],
+                    dependencies=[ev.id],
+                    session=self.session_id,
+                    worker="proof",
+                    notes=notes,
+                    evidence={
+                        "source_artifact": ev.id,
+                        "finite_lattice": True,
+                        "is_continuum": False,
+                        "is_proof": False,
+                        "hypotheses": [
+                            "finite lattice",
+                            "fixed coupling",
+                            "no continuum limit admitted",
+                        ],
+                        **{k: v for k, v in (ev.evidence or {}).items() if k in (
+                            "group", "L", "beta", "seed", "family", "mean_plaquette",
+                        )},
+                    },
+                    verification={
+                        "numerical": ev.verification.get("numerical", "PASS"),
+                        "symbolic": "NOT_RUN",
+                        "literature": "NOT_RUN",
+                        "formal": "NOT_VERIFIED",
+                    },
+                ))
+                out.append(self.store.mint(
+                    ObjectKind.CLAIM,
+                    f"promote {ev.id} to continuum mass-gap theorem",
+                    problem=self.spec.id,
+                    status=ClaimStatus.REJECTED,
+                    derived_from=[ev.id],
+                    session=self.session_id,
+                    worker="proof",
+                    notes=[
+                        "forbidden_shortcut:numerical_gap_proxy_as_proof",
+                        "forbidden_shortcut:finite_lattice_as_continuum",
+                        "NOT A PROOF",
+                    ],
+                    verification={"numerical": "PASS", "formal": "NOT_VERIFIED"},
+                    evidence={"source_artifact": ev.id, "is_proof": False},
+                ))
+                continue
+
             out.append(self.store.mint(
                 ObjectKind.LEMMA,
                 f"finite consequence of {ev.id}: {ev.statement}",
@@ -233,17 +296,60 @@ class Workbench:
                 notes=list(art.notes) + ["unbounded_not_an_experiment"],
                 evidence=dict(art.evidence),
             )
+
+        if art.pond == "yang_mills" or self.spec.key == "Yang_Mills":
+            from qwuack.millennium.killer import ProofKiller
+            from qwuack.millennium.artifacts import Memory
+            verdict = ProofKiller().attack(art, Memory())
+            if art.status in {"REJECTED", "KILLED"} or (
+                verdict.status in {"KILLED", "REJECTED"} and art.status not in {"REJECTED", "KILLED"}
+            ):
+                status = ClaimStatus.REJECTED if (
+                    art.status == "REJECTED" or verdict.status == "REJECTED"
+                ) else ClaimStatus.KILLED
+                return self.store.mint(
+                    ObjectKind.CLAIM,
+                    art.statement,
+                    problem=self.spec.id,
+                    status=status,
+                    session=self.session_id,
+                    worker=worker,
+                    notes=list(art.notes) + list(verdict.notes) + [f"killer:{verdict.reason}"],
+                    evidence={
+                        "artifact": art.name,
+                        "pond": art.pond,
+                        "killer_reason": art.evidence.get("killer_reason", verdict.reason),
+                        "attacks_landed": verdict.attacks_landed,
+                        **dict(art.evidence),
+                    },
+                    verification={
+                        "numerical": "NOT_RUN",
+                        "symbolic": "NOT_RUN",
+                        "literature": "NOT_RUN",
+                        "formal": "NOT_VERIFIED",
+                    },
+                )
+
         status = _status_from_artifact(art.status)
         kind = _kind_from_artifact(art.kind.value)
         if kind == ObjectKind.LEMMA and shortcut_forbidden(self.spec, "named_height_window_as_proof"):
             status = ClaimStatus.COMPUTATIONAL_EVIDENCE
             kind = ObjectKind.EXPERIMENT
+
+        if self.spec.key == "Yang_Mills" and kind in {ObjectKind.LEMMA, ObjectKind.PROOF}:
+            if art.kind.value in {"computational_evidence", "verified_lemma"} and art.evidence.get("certificate") is None:
+                kind = ObjectKind.EXPERIMENT
+                status = ClaimStatus.COMPUTATIONAL_EVIDENCE
+
         ver = {
             "numerical": "PASS" if art.status == "VERIFIED" else "NOT_RUN",
             "symbolic": "NOT_RUN",
             "literature": "NOT_RUN",
             "formal": "NOT_VERIFIED",
         }
+        if art.kind.value == "formal_proof" and art.evidence.get("certificate"):
+            ver["formal"] = "PASS" if art.evidence.get("formal") == "PASS" else "NOT_VERIFIED"
+
         return self.store.mint(
             kind,
             art.statement,
