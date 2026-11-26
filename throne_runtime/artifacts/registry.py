@@ -6,7 +6,7 @@ import json
 import sqlite3
 import threading
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from .models import (
     ArtifactRecord,
@@ -17,6 +17,7 @@ from .models import (
     Sensitivity,
     Trust,
 )
+from .manifest import compute_manifest_hash
 
 
 class Registry:
@@ -100,6 +101,18 @@ class Registry:
                     );
 
                     CREATE INDEX IF NOT EXISTS idx_promotions_artifact ON promotions(artifact_id);
+
+                    CREATE TABLE IF NOT EXISTS verification_records (
+                        record_id TEXT PRIMARY KEY,
+                        record_hash TEXT NOT NULL UNIQUE,
+                        artifact_id TEXT NOT NULL,
+                        content_hash TEXT NOT NULL,
+                        payload_json TEXT NOT NULL,
+                        created_at TEXT NOT NULL
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_ver_records_artifact
+                        ON verification_records(artifact_id);
                     """
                 )
                 conn.commit()
@@ -107,16 +120,31 @@ class Registry:
                 conn.close()
 
     def put_run(self, manifest: RunManifest) -> None:
+        """UPSERT run — never delete/recreate a referenced parent row."""
         with self._lock:
             conn = self._connect()
             try:
                 conn.execute(
                     """
-                    INSERT OR REPLACE INTO runs (
+                    INSERT INTO runs (
                         run_id, project, subsystem, run_type, created_at,
                         source_commit, parent_run, trust, evidence_grade,
                         isolation, sensitivity, status, manifest_json, manifest_hash
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(run_id) DO UPDATE SET
+                        project=excluded.project,
+                        subsystem=excluded.subsystem,
+                        run_type=excluded.run_type,
+                        created_at=excluded.created_at,
+                        source_commit=excluded.source_commit,
+                        parent_run=excluded.parent_run,
+                        trust=excluded.trust,
+                        evidence_grade=excluded.evidence_grade,
+                        isolation=excluded.isolation,
+                        sensitivity=excluded.sensitivity,
+                        status=excluded.status,
+                        manifest_json=excluded.manifest_json,
+                        manifest_hash=excluded.manifest_hash
                     """,
                     (
                         manifest.run_id,
@@ -144,11 +172,22 @@ class Registry:
             conn = self._connect()
             try:
                 row = conn.execute(
-                    "SELECT manifest_json FROM runs WHERE run_id = ?", (run_id,)
+                    "SELECT manifest_json, manifest_hash FROM runs WHERE run_id = ?",
+                    (run_id,),
                 ).fetchone()
                 if not row:
                     return None
-                return RunManifest.from_dict(json.loads(row["manifest_json"]))
+                data = json.loads(row["manifest_json"])
+                m = RunManifest.from_dict(data)
+                # Integrity: recompute and compare stored hash
+                expected = compute_manifest_hash(m)
+                stored = row["manifest_hash"] or m.manifest_hash
+                if stored and stored != expected:
+                    raise ValueError(
+                        f"corrupted manifest for {run_id}: "
+                        f"stored hash mismatch"
+                    )
+                return m
             finally:
                 conn.close()
 
@@ -170,17 +209,33 @@ class Registry:
                 conn.close()
 
     def put_artifact(self, rec: ArtifactRecord) -> None:
+        """UPSERT artifact — preserve row identity under concurrent updates."""
         with self._lock:
             conn = self._connect()
             try:
                 conn.execute(
                     """
-                    INSERT OR REPLACE INTO artifacts (
+                    INSERT INTO artifacts (
                         artifact_id, run_id, content_hash, original_filename,
                         stored_location, media_type, size_bytes, source_subsystem,
                         parent_run, trust, evidence_grade, isolation, sensitivity,
                         created_at, verification_history
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(artifact_id) DO UPDATE SET
+                        run_id=excluded.run_id,
+                        content_hash=excluded.content_hash,
+                        original_filename=excluded.original_filename,
+                        stored_location=excluded.stored_location,
+                        media_type=excluded.media_type,
+                        size_bytes=excluded.size_bytes,
+                        source_subsystem=excluded.source_subsystem,
+                        parent_run=excluded.parent_run,
+                        trust=excluded.trust,
+                        evidence_grade=excluded.evidence_grade,
+                        isolation=excluded.isolation,
+                        sensitivity=excluded.sensitivity,
+                        created_at=excluded.created_at,
+                        verification_history=excluded.verification_history
                     """,
                     (
                         rec.artifact_id,
@@ -286,7 +341,9 @@ class Registry:
             finally:
                 conn.close()
 
-    def list_promotions(self, artifact_id: str | None = None, run_id: str | None = None) -> list[PromotionRecord]:
+    def list_promotions(
+        self, artifact_id: str | None = None, run_id: str | None = None
+    ) -> list[PromotionRecord]:
         with self._lock:
             conn = self._connect()
             try:
@@ -327,5 +384,51 @@ class Registry:
                         )
                     )
                 return out
+            finally:
+                conn.close()
+
+    def persist_verification_record(self, record_dict: dict[str, Any]) -> None:
+        """Store a sealed verification execution record; reject hash collisions (replay)."""
+        record_hash = record_dict.get("record_hash") or ""
+        if not record_hash:
+            raise ValueError("verification record missing record_hash")
+        with self._lock:
+            conn = self._connect()
+            try:
+                existing = conn.execute(
+                    "SELECT record_id FROM verification_records WHERE record_hash = ?",
+                    (record_hash,),
+                ).fetchone()
+                if existing:
+                    raise ValueError("replayed verification record rejected")
+                conn.execute(
+                    """
+                    INSERT INTO verification_records (
+                        record_id, record_hash, artifact_id, content_hash,
+                        payload_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        record_dict["record_id"],
+                        record_hash,
+                        record_dict["artifact_id"],
+                        record_dict["content_hash"],
+                        json.dumps(record_dict, sort_keys=True),
+                        record_dict.get("executed_at", ""),
+                    ),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+    def seen_verification_hashes(self, artifact_id: str) -> set[str]:
+        with self._lock:
+            conn = self._connect()
+            try:
+                rows = conn.execute(
+                    "SELECT record_hash FROM verification_records WHERE artifact_id = ?",
+                    (artifact_id,),
+                ).fetchall()
+                return {r["record_hash"] for r in rows}
             finally:
                 conn.close()
