@@ -1,14 +1,16 @@
-"""Durable promotion journal for crash-consistent isolation transitions."""
+"""Durable promotion journal (shared Database / WAL)."""
 
 from __future__ import annotations
 
-import sqlite3
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .sqlite_db import Database
 
 
 def _utc_now() -> str:
@@ -27,7 +29,6 @@ class JournalState(str, Enum):
     ROLLED_BACK = "ROLLED_BACK"
 
 
-# Only truly terminal states — RECOVERY_REQUIRED remains visible to recovery.
 TERMINAL_STATES = frozenset(
     {
         JournalState.COMPLETED,
@@ -79,22 +80,28 @@ class JournalEntry:
 
 
 class PromotionJournal:
-    def __init__(self, db_path: Path, lock: threading.RLock | None = None) -> None:
-        self.db_path = Path(db_path)
+    def __init__(
+        self,
+        db_path: Path | None = None,
+        lock: threading.RLock | None = None,
+        *,
+        database: "Database | None" = None,
+    ) -> None:
+        from .sqlite_db import Database
+
+        if database is not None:
+            self.db = database
+        else:
+            if db_path is None:
+                raise ValueError("db_path or database required")
+            self.db = Database(db_path)
+        self.db_path = self.db.path
         self._lock = lock or threading.RLock()
         self._ensure_schema()
 
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.db_path), timeout=30)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA foreign_keys=ON")
-        return conn
-
     def _ensure_schema(self) -> None:
         with self._lock:
-            conn = self._connect()
-            try:
+            with self.db.write_transaction() as conn:
                 conn.executescript(
                     """
                     CREATE TABLE IF NOT EXISTS promotion_journal (
@@ -122,24 +129,20 @@ class PromotionJournal:
                         ON promotion_journal(state);
                     """
                 )
-                # Idempotent column add for pre-migration DBs
                 cols = {
                     r[1]
                     for r in conn.execute("PRAGMA table_info(promotion_journal)").fetchall()
                 }
                 if "retry_count" not in cols:
                     conn.execute(
-                        "ALTER TABLE promotion_journal ADD COLUMN retry_count INTEGER DEFAULT 0"
+                        "ALTER TABLE promotion_journal "
+                        "ADD COLUMN retry_count INTEGER DEFAULT 0"
                     )
-                conn.commit()
-            finally:
-                conn.close()
 
     def put(self, entry: JournalEntry) -> None:
         entry.updated_at = _utc_now()
         with self._lock:
-            conn = self._connect()
-            try:
+            with self.db.write_transaction() as conn:
                 conn.execute(
                     """
                     INSERT INTO promotion_journal (
@@ -177,14 +180,10 @@ class PromotionJournal:
                         entry.retry_count,
                     ),
                 )
-                conn.commit()
-            finally:
-                conn.close()
 
     def get(self, promotion_id: str) -> JournalEntry | None:
         with self._lock:
-            conn = self._connect()
-            try:
+            with self.db.connection() as conn:
                 row = conn.execute(
                     "SELECT * FROM promotion_journal WHERE promotion_id = ?",
                     (promotion_id,),
@@ -192,14 +191,10 @@ class PromotionJournal:
                 if not row:
                     return None
                 return self._row(row)
-            finally:
-                conn.close()
 
     def list_incomplete(self) -> list[JournalEntry]:
-        """Non-terminal entries, including RECOVERY_REQUIRED for retry."""
         with self._lock:
-            conn = self._connect()
-            try:
+            with self.db.connection() as conn:
                 terminal = tuple(s.value for s in TERMINAL_STATES)
                 placeholders = ",".join("?" * len(terminal))
                 rows = conn.execute(
@@ -208,22 +203,17 @@ class PromotionJournal:
                     terminal,
                 ).fetchall()
                 return [self._row(r) for r in rows]
-            finally:
-                conn.close()
 
     def list_recovery_required(self) -> list[JournalEntry]:
         with self._lock:
-            conn = self._connect()
-            try:
+            with self.db.connection() as conn:
                 rows = conn.execute(
                     "SELECT * FROM promotion_journal WHERE state = ? ORDER BY updated_at",
                     (JournalState.RECOVERY_REQUIRED.value,),
                 ).fetchall()
                 return [self._row(r) for r in rows]
-            finally:
-                conn.close()
 
-    def _row(self, row: sqlite3.Row) -> JournalEntry:
+    def _row(self, row: Any) -> JournalEntry:
         keys = row.keys()
         return JournalEntry(
             promotion_id=row["promotion_id"],
