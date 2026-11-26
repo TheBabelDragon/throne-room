@@ -1,7 +1,8 @@
 """Safe ingestion scanner.
 
-Rejects path traversal, symlink escapes, unsafe archive members.
-Never executes discovered files. Default new inputs are QUARANTINED.
+Symlink inputs are rejected by default. Paths are resolved and must stay
+under the configured storage/intake root. No symlink following during
+recursive scans. Filesystem segregation is not an OS-level execution sandbox.
 """
 
 from __future__ import annotations
@@ -11,7 +12,6 @@ import tarfile
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 from .hashing import sha256_file
 
@@ -19,7 +19,7 @@ from .hashing import sha256_file
 @dataclass
 class ScanLimits:
     max_files: int = 10_000
-    max_total_bytes: int = 512 * 1024 * 1024  # 512 MiB
+    max_total_bytes: int = 512 * 1024 * 1024
     max_single_file_bytes: int = 256 * 1024 * 1024
 
 
@@ -64,47 +64,87 @@ def _is_under(root: Path, candidate: Path) -> bool:
         return False
 
 
-class ArtifactScanner:
-    """Scan paths for safe ingestion into the artifact store."""
+def _safe_relative_name(name: str) -> str:
+    """Reject traversal, absolute, and alternate-separator forms."""
+    if not name or name in (".", ".."):
+        raise ScanError(f"unsafe filename: {name!r}")
+    # Normalize separators
+    normalized = name.replace("\\", "/")
+    if normalized.startswith("/") or normalized.startswith("//"):
+        raise ScanError(f"absolute path rejected: {name!r}")
+    # Windows drive
+    if len(normalized) >= 2 and normalized[1] == ":":
+        raise ScanError(f"drive-letter path rejected: {name!r}")
+    parts = Path(normalized).parts
+    if ".." in parts or any(p == "" for p in parts):
+        raise ScanError(f"path traversal rejected: {name!r}")
+    if any("\x00" in p for p in parts):
+        raise ScanError(f"NUL in path rejected: {name!r}")
+    return str(Path(*parts)) if parts else name
 
-    def __init__(self, storage_root: Path, limits: ScanLimits | None = None) -> None:
+
+class ArtifactScanner:
+    def __init__(
+        self,
+        storage_root: Path,
+        limits: ScanLimits | None = None,
+        *,
+        allow_symlinks: bool = False,
+    ) -> None:
         self.storage_root = Path(storage_root).resolve()
         self.limits = limits or ScanLimits()
+        self.allow_symlinks = allow_symlinks
 
     def scan_file(self, path: Path, *, relative_name: str | None = None) -> ScannedFile:
         path = Path(path)
+
+        # Reject symlinks by default (before resolve follows them)
+        if path.is_symlink() and not self.allow_symlinks:
+            raise ScanError(f"symlink input rejected: {path}")
+
         if not path.exists():
             raise ScanError(f"path does not exist: {path}")
-        if path.is_symlink():
-            # Do not follow; record and reject for storage placement outside root.
-            target = path.resolve()
-            if not _is_under(self.storage_root, target) and not _is_under(path.parent, target):
-                # Allow only if the ultimate target stays within a controlled area;
-                # for v0.1 we reject external symlink targets on ingest.
-                if not target.exists() or not _is_under(self.storage_root, target):
-                    raise ScanError(f"symlink escape rejected: {path} -> {target}")
-        if not path.is_file():
+
+        # Resolve and re-check
+        try:
+            resolved = path.resolve(strict=True)
+        except OSError as e:
+            raise ScanError(f"path resolve failed: {path}") from e
+
+        if resolved.is_symlink() and not self.allow_symlinks:
+            raise ScanError(f"symlink resolved path rejected: {path}")
+
+        if not resolved.is_file():
             raise ScanError(f"not a regular file: {path}")
 
-        size = path.stat().st_size
-        if size > self.limits.max_single_file_bytes:
-            raise ScanError(f"file exceeds size limit: {path} ({size} bytes)")
+        # Containment: if path is under storage_root, enforce; intake from
+        # outside is allowed for explicit single-file ingest but relative
+        # name must still be safe.
+        rel = _safe_relative_name(relative_name or path.name)
 
-        rel = relative_name or path.name
-        if ".." in Path(rel).parts or rel.startswith("/") or rel.startswith("\\"):
-            raise ScanError(f"path traversal rejected: {rel}")
+        # TOCTOU: stat then hash then re-stat size
+        st1 = resolved.stat()
+        if st1.st_size > self.limits.max_single_file_bytes:
+            raise ScanError(f"file exceeds size limit: {path} ({st1.st_size} bytes)")
+
+        content_hash = sha256_file(resolved)
+        st2 = resolved.stat()
+        if st2.st_size != st1.st_size or st2.st_ino != st1.st_ino:
+            raise ScanError(f"file changed during scan (TOCTOU): {path}")
 
         return ScannedFile(
-            path=path,
+            path=resolved,
             relative=rel,
-            size_bytes=size,
-            content_hash=sha256_file(path),
+            size_bytes=st2.st_size,
+            content_hash=content_hash,
             media_type=_guess_media_type(rel),
-            is_symlink=path.is_symlink(),
+            is_symlink=False,
         )
 
     def scan_tree(self, root: Path) -> list[ScannedFile]:
         root = Path(root)
+        if root.is_symlink():
+            raise ScanError(f"symlink tree root rejected: {root}")
         if not root.is_dir():
             raise ScanError(f"not a directory: {root}")
 
@@ -118,15 +158,8 @@ class ArtifactScanner:
             for name in filenames:
                 p = Path(dirpath) / name
                 if p.is_symlink():
-                    # Reject symlink files that escape
-                    try:
-                        resolved = p.resolve()
-                    except OSError as e:
-                        raise ScanError(f"symlink resolve failed: {p}") from e
-                    if not _is_under(root, resolved):
-                        raise ScanError(f"symlink escape rejected: {p}")
-                    continue  # skip storing symlink itself for v0.1 tree ingest
-                rel = str(p.relative_to(root))
+                    raise ScanError(f"symlink in tree rejected: {p}")
+                rel = _safe_relative_name(str(p.relative_to(root)))
                 sf = self.scan_file(p, relative_name=rel)
                 results.append(sf)
                 total += sf.size_bytes
@@ -137,16 +170,14 @@ class ArtifactScanner:
         return results
 
     def inspect_archive_paths(self, archive_path: Path) -> list[str]:
-        """Inspect archive member paths without extraction; reject escapes."""
         archive_path = Path(archive_path)
+        if archive_path.is_symlink():
+            raise ScanError(f"symlink archive rejected: {archive_path}")
         names: list[str] = []
         lower = archive_path.name.lower()
 
         def _check(name: str) -> None:
-            # Normalize and reject absolute / traversal
-            parts = Path(name).parts
-            if name.startswith("/") or name.startswith("\\") or ".." in parts:
-                raise ScanError(f"unsafe archive member path: {name}")
+            _safe_relative_name(name.replace("\\", "/").lstrip("/"))
             names.append(name)
 
         if lower.endswith(".zip"):

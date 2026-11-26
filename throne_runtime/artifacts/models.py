@@ -1,13 +1,8 @@
-"""Independent classification dimensions and core data models.
-
-Trust, evidence grade, isolation, and sensitivity are independent axes.
-An artifact may be numerically cross-checked while remaining untrusted
-and sandboxed. A formally proved artifact does not automatically become
-a certified implementation. A successful experiment never becomes a proof.
-"""
+"""Independent classification dimensions and strict data models."""
 
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any
@@ -51,39 +46,129 @@ class RunStatus(str, Enum):
 MANIFEST_SCHEMA = "throne.runtime.artifact-manifest"
 MANIFEST_VERSION = 1
 
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_ISO_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})?$"
+)
+
+KNOWN_MANIFEST_KEYS = frozenset(
+    {
+        "schema",
+        "version",
+        "run_id",
+        "project",
+        "subsystem",
+        "run_type",
+        "created_at",
+        "source_commit",
+        "parent_run",
+        "trust",
+        "evidence_grade",
+        "isolation",
+        "sensitivity",
+        "inputs",
+        "outputs",
+        "checks",
+        "provenance",
+        "status",
+        "manifest_hash",
+    }
+)
+
+
+def _require_str(d: dict[str, Any], key: str) -> str:
+    if key not in d:
+        raise ValueError(f"manifest missing required field: {key}")
+    v = d[key]
+    if not isinstance(v, str):
+        raise ValueError(f"manifest field {key!r} must be str, got {type(v).__name__}")
+    return v
+
+
+def _require_int(d: dict[str, Any], key: str) -> int:
+    if key not in d:
+        raise ValueError(f"manifest missing required field: {key}")
+    v = d[key]
+    if type(v) is not int:  # reject bool subclassing int
+        raise ValueError(f"manifest field {key!r} must be int, got {type(v).__name__}")
+    return v
+
+
+def _optional_str(d: dict[str, Any], key: str, default: str = "") -> str:
+    if key not in d or d[key] is None:
+        return default
+    v = d[key]
+    if not isinstance(v, str):
+        raise ValueError(f"manifest field {key!r} must be str, got {type(v).__name__}")
+    return v
+
+
+def _validate_sha256(h: str, label: str) -> str:
+    if h and not _SHA256_RE.match(h):
+        raise ValueError(f"invalid SHA-256 for {label}: {h[:20]!r}...")
+    return h
+
+
+def _validate_timestamp(ts: str) -> str:
+    if not _ISO_RE.match(ts):
+        raise ValueError(f"malformed timestamp: {ts!r}")
+    return ts
+
 
 @dataclass(frozen=True)
 class ArtifactRef:
-    """Reference to a content-addressed artifact within a run."""
-
     artifact_id: str
     content_hash: str
     filename: str
     media_type: str = "application/octet-stream"
     size_bytes: int = 0
-    role: str = "output"  # input | output | log | certificate | other
+    role: str = "output"
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "ArtifactRef":
+        if not isinstance(d, dict):
+            raise ValueError("artifact ref must be an object")
+        unknown = set(d) - {
+            "artifact_id",
+            "content_hash",
+            "filename",
+            "media_type",
+            "size_bytes",
+            "role",
+        }
+        if unknown:
+            raise ValueError(f"artifact ref unknown fields: {sorted(unknown)}")
+        for k in ("artifact_id", "content_hash", "filename"):
+            if k not in d:
+                raise ValueError(f"artifact ref missing {k}")
+            if not isinstance(d[k], str):
+                raise ValueError(f"artifact ref {k} must be str")
+        size = d.get("size_bytes", 0)
+        if type(size) is not int:
+            raise ValueError("artifact ref size_bytes must be int")
+        media = d.get("media_type", "application/octet-stream")
+        if not isinstance(media, str):
+            raise ValueError("artifact ref media_type must be str")
+        role = d.get("role", "output")
+        if not isinstance(role, str):
+            raise ValueError("artifact ref role must be str")
         return cls(
-            artifact_id=str(d["artifact_id"]),
-            content_hash=str(d["content_hash"]),
-            filename=str(d["filename"]),
-            media_type=str(d.get("media_type", "application/octet-stream")),
-            size_bytes=int(d.get("size_bytes", 0)),
-            role=str(d.get("role", "output")),
+            artifact_id=d["artifact_id"],
+            content_hash=_validate_sha256(d["content_hash"], "artifact_ref"),
+            filename=d["filename"],
+            media_type=media,
+            size_bytes=size,
+            role=role,
         )
 
 
 @dataclass
 class CheckResult:
-    """Record of a verification or validation check."""
-
     name: str
-    status: str  # PASS | FAIL | SKIP | ERROR
+    status: str
     detail: str = ""
     verifier_id: str = ""
     verifier_version: str = ""
@@ -96,26 +181,32 @@ class CheckResult:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "CheckResult":
+        if not isinstance(d, dict):
+            raise ValueError("check result must be an object")
+        for k in ("name", "status"):
+            if k not in d or not isinstance(d[k], str):
+                raise ValueError(f"check result {k} must be str")
+        ch = d.get("certificate_hash", "")
+        if ch and not isinstance(ch, str):
+            raise ValueError("certificate_hash must be str")
+        if ch:
+            _validate_sha256(ch, "certificate_hash")
         return cls(
-            name=str(d["name"]),
-            status=str(d["status"]),
-            detail=str(d.get("detail", "")),
-            verifier_id=str(d.get("verifier_id", "")),
-            verifier_version=str(d.get("verifier_version", "")),
-            target=str(d.get("target", "")),
-            certificate_hash=str(d.get("certificate_hash", "")),
-            timestamp=str(d.get("timestamp", "")),
+            name=d["name"],
+            status=d["status"],
+            detail=d["detail"] if isinstance(d.get("detail", ""), str) else "",
+            verifier_id=d["verifier_id"] if isinstance(d.get("verifier_id", ""), str) else "",
+            verifier_version=d["verifier_version"]
+            if isinstance(d.get("verifier_version", ""), str)
+            else "",
+            target=d["target"] if isinstance(d.get("target", ""), str) else "",
+            certificate_hash=ch or "",
+            timestamp=d["timestamp"] if isinstance(d.get("timestamp", ""), str) else "",
         )
 
 
 @dataclass
 class RunManifest:
-    """Versioned, strictly validated run manifest.
-
-    Classifications are independent. No artifact may assign itself a higher
-    trust or evidence grade through its own manifest; promotion is external.
-    """
-
     schema: str = MANIFEST_SCHEMA
     version: int = MANIFEST_VERSION
     run_id: str = ""
@@ -167,57 +258,85 @@ class RunManifest:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "RunManifest":
-        required = (
-            "schema",
-            "version",
-            "run_id",
-            "project",
-            "subsystem",
-            "run_type",
-            "created_at",
-        )
-        missing = [k for k in required if k not in d]
-        if missing:
-            raise ValueError(f"manifest missing required fields: {missing}")
-        if d.get("schema") != MANIFEST_SCHEMA:
-            raise ValueError(f"unknown manifest schema: {d.get('schema')!r}")
-        if int(d.get("version", 0)) != MANIFEST_VERSION:
-            raise ValueError(f"unsupported manifest version: {d.get('version')}")
+        if not isinstance(d, dict):
+            raise ValueError("manifest root must be an object")
+        unknown = set(d) - KNOWN_MANIFEST_KEYS
+        if unknown:
+            raise ValueError(f"manifest unknown fields: {sorted(unknown)}")
+
+        schema = _require_str(d, "schema")
+        if schema != MANIFEST_SCHEMA:
+            raise ValueError(f"unknown manifest schema: {schema!r}")
+        version = _require_int(d, "version")
+        if version != MANIFEST_VERSION:
+            raise ValueError(f"unsupported manifest version: {version}")
+
+        run_id = _require_str(d, "run_id")
+        project = _require_str(d, "project")
+        subsystem = _require_str(d, "subsystem")
+        run_type = _require_str(d, "run_type")
+        created_at = _validate_timestamp(_require_str(d, "created_at"))
 
         def _enum(enum_cls: type[Enum], key: str, default: Enum) -> Enum:
-            raw = d.get(key, default.value)
+            if key not in d:
+                return default
+            raw = d[key]
+            if not isinstance(raw, str):
+                raise ValueError(f"invalid {key}: must be str")
             try:
                 return enum_cls(raw)
             except ValueError as e:
                 raise ValueError(f"invalid {key}: {raw!r}") from e
 
+        parent = d.get("parent_run")
+        if parent is not None and not isinstance(parent, str):
+            raise ValueError("parent_run must be str or null")
+
+        inputs_raw = d.get("inputs", [])
+        outputs_raw = d.get("outputs", [])
+        checks_raw = d.get("checks", [])
+        if not isinstance(inputs_raw, list):
+            raise ValueError("inputs must be a list")
+        if not isinstance(outputs_raw, list):
+            raise ValueError("outputs must be a list")
+        if not isinstance(checks_raw, list):
+            raise ValueError("checks must be a list")
+
+        prov = d.get("provenance", {})
+        if prov is None:
+            prov = {}
+        if not isinstance(prov, dict):
+            raise ValueError("provenance must be an object")
+
+        mh = _optional_str(d, "manifest_hash", "")
+        if mh:
+            _validate_sha256(mh, "manifest_hash")
+
         return cls(
-            schema=str(d["schema"]),
-            version=int(d["version"]),
-            run_id=str(d["run_id"]),
-            project=str(d["project"]),
-            subsystem=str(d["subsystem"]),
-            run_type=str(d["run_type"]),
-            created_at=str(d["created_at"]),
-            source_commit=str(d.get("source_commit", "")),
-            parent_run=d.get("parent_run"),
+            schema=schema,
+            version=version,
+            run_id=run_id,
+            project=project,
+            subsystem=subsystem,
+            run_type=run_type,
+            created_at=created_at,
+            source_commit=_optional_str(d, "source_commit", ""),
+            parent_run=parent,
             trust=_enum(Trust, "trust", Trust.UNTRUSTED),  # type: ignore[arg-type]
             evidence_grade=_enum(EvidenceGrade, "evidence_grade", EvidenceGrade.EXPLORATORY),  # type: ignore[arg-type]
             isolation=_enum(Isolation, "isolation", Isolation.QUARANTINED),  # type: ignore[arg-type]
             sensitivity=_enum(Sensitivity, "sensitivity", Sensitivity.INTERNAL),  # type: ignore[arg-type]
-            inputs=[ArtifactRef.from_dict(x) for x in d.get("inputs", [])],
-            outputs=[ArtifactRef.from_dict(x) for x in d.get("outputs", [])],
-            checks=[CheckResult.from_dict(x) for x in d.get("checks", [])],
-            provenance=dict(d.get("provenance") or {}),
+            inputs=[ArtifactRef.from_dict(x) for x in inputs_raw],
+            outputs=[ArtifactRef.from_dict(x) for x in outputs_raw],
+            checks=[CheckResult.from_dict(x) for x in checks_raw],
+            provenance=dict(prov),
             status=_enum(RunStatus, "status", RunStatus.PENDING),  # type: ignore[arg-type]
-            manifest_hash=str(d.get("manifest_hash", "")),
+            manifest_hash=mh,
         )
 
 
 @dataclass
 class ArtifactRecord:
-    """Registry record for a single stored artifact."""
-
     artifact_id: str
     run_id: str
     content_hash: str
@@ -256,8 +375,6 @@ class ArtifactRecord:
 
 @dataclass
 class PromotionRecord:
-    """Append-only promotion audit entry."""
-
     promotion_id: str
     artifact_id: str
     run_id: str
@@ -270,7 +387,7 @@ class PromotionRecord:
     policy_rule: str
     actor: str
     reason: str
-    decision: str  # ALLOWED | REJECTED
+    decision: str
     timestamp: str
     verifier_evidence: dict[str, Any] = field(default_factory=dict)
     source_hashes: dict[str, str] = field(default_factory=dict)
