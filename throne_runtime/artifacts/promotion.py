@@ -1,19 +1,20 @@
-"""PromotionGate — sole classification/storage transition mechanism.
+"""PromotionGate with recoverable filesystem/registry transaction.
 
-Atomic sequence:
-1. Verify source blob hash
-2. Create destination tier location
-3. Verify destination hash+size
-4. Update registry metadata
-5. Remove previous tier link (failure => not success)
-6. Confirm old path gone
-7. Append successful audit
+Sequence:
+1. Snapshot mutable fields
+2. Verify source blob
+3. Create destination (no overwrite of unrelated content)
+4. Verify destination
+5. Update registry metadata (old path still present)
+6. Append audit
+7. Only then remove old-tier path
 
-Any failure restores all mutable fields and removes new destination link.
+Failure before step 7 restores metadata and removes dest; original path kept.
 """
 
 from __future__ import annotations
 
+import threading
 import uuid
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -30,7 +31,12 @@ from .models import (
 )
 from .registry import Registry
 from .router import ArtifactRouter
-from .verifiers import VerificationExecutionRecord, VerifierRegistry
+from .verifiers import (
+    CAPABILITY_FOR_TARGET,
+    VerificationExecutionRecord,
+    VerifierCapability,
+    VerifierRegistry,
+)
 
 
 def _utc_now() -> str:
@@ -77,6 +83,14 @@ class PromotionGate:
         self.isolation = isolation_manager
         self.storage = storage
         self.verifiers = verifier_registry or VerifierRegistry()
+        self._locks: dict[str, threading.Lock] = {}
+        self._locks_guard = threading.Lock()
+
+    def _artifact_lock(self, artifact_id: str) -> threading.Lock:
+        with self._locks_guard:
+            if artifact_id not in self._locks:
+                self._locks[artifact_id] = threading.Lock()
+            return self._locks[artifact_id]
 
     def _snapshot(self, artifact: ArtifactRecord) -> dict[str, Any]:
         return {
@@ -108,7 +122,43 @@ class PromotionGate:
         source_hashes: dict[str, str] | None = None,
         execution_record: VerificationExecutionRecord | None = None,
         source_commit: str = "",
-        _fail_at: str | None = None,  # test injection point
+        proof_target: str = "",
+        _fail_at: str | None = None,
+    ) -> PromotionRecord:
+        lock = self._artifact_lock(artifact.artifact_id)
+        with lock:
+            return self._promote_locked(
+                artifact,
+                target_isolation=target_isolation,
+                target_evidence=target_evidence,
+                target_trust=target_trust,
+                actor=actor,
+                reason=reason,
+                policy_rule=policy_rule,
+                verifier_evidence=verifier_evidence,
+                source_hashes=source_hashes,
+                execution_record=execution_record,
+                source_commit=source_commit,
+                proof_target=proof_target,
+                _fail_at=_fail_at,
+            )
+
+    def _promote_locked(
+        self,
+        artifact: ArtifactRecord,
+        *,
+        target_isolation: Isolation,
+        target_evidence: EvidenceGrade | None,
+        target_trust: Trust | None,
+        actor: str,
+        reason: str,
+        policy_rule: str,
+        verifier_evidence: dict[str, Any] | None,
+        source_hashes: dict[str, str] | None,
+        execution_record: VerificationExecutionRecord | None,
+        source_commit: str,
+        proof_target: str,
+        _fail_at: str | None,
     ) -> PromotionRecord:
         verifier_evidence = dict(verifier_evidence or {})
         source_hashes = dict(source_hashes or {})
@@ -126,20 +176,22 @@ class PromotionGate:
                 f"not permitted"
             )
 
-        if decision == "ALLOWED" and target_isolation == Isolation.VALIDATED:
-            if execution_record is None:
-                decision = "REJECTED"
-                reject_reason = "VALIDATED requires authenticated verifier execution"
-
-        if decision == "ALLOWED" and (
-            target_isolation == Isolation.CERTIFIED_READ_ONLY
-            or new_evidence in (EvidenceGrade.FORMALLY_PROVED, EvidenceGrade.CERTIFIED)
+        # Capability requirements
+        required_cap: VerifierCapability | None = None
+        if target_isolation == Isolation.VALIDATED:
+            required_cap = VerifierCapability.INTEGRITY_CHECK
+        if target_isolation == Isolation.CERTIFIED_READ_ONLY or new_evidence in (
+            EvidenceGrade.FORMALLY_PROVED,
+            EvidenceGrade.CERTIFIED,
         ):
+            required_cap = VerifierCapability.FORMAL_CERTIFICATE_VERIFICATION
+
+        if decision == "ALLOWED" and required_cap is not None:
             if execution_record is None:
                 decision = "REJECTED"
                 reject_reason = (
-                    "CERTIFIED/FORMALLY_PROVED requires authenticated verifier "
-                    "execution; caller-attested PASS is insufficient"
+                    f"{target_isolation.value} requires authenticated verifier "
+                    f"execution with {required_cap.value}"
                 )
             else:
                 seen_hashes = self.registry.seen_verification_hashes(artifact.artifact_id)
@@ -149,6 +201,8 @@ class PromotionGate:
                     expected_content_hash=artifact.content_hash,
                     expected_artifact_id=artifact.artifact_id,
                     expected_source_commit=source_commit or None,
+                    expected_proof_target=proof_target or None,
+                    required_capability=required_cap,
                     seen_record_hashes=seen_hashes,
                     seen_nonces=seen_nonces,
                 )
@@ -157,7 +211,7 @@ class PromotionGate:
                     reject_reason = msg
                 elif execution_record.result == "UNSUPPORTED":
                     decision = "REJECTED"
-                    reject_reason = "unsupported verifier cannot certify"
+                    reject_reason = "unsupported verifier cannot authorize target"
                 else:
                     try:
                         self.registry.persist_verification_record(
@@ -167,27 +221,13 @@ class PromotionGate:
                         decision = "REJECTED"
                         reject_reason = str(e)
                     else:
-                        verifier_evidence = {
-                            **verifier_evidence,
-                            **execution_record.as_dict(),
+                        # Strip any raw secrets if present
+                        safe = {
+                            k: v
+                            for k, v in execution_record.as_dict().items()
+                            if k not in ("signing_key", "key", "key_hex")
                         }
-
-        if decision == "ALLOWED" and new_evidence in (
-            EvidenceGrade.FORMALLY_PROVED,
-            EvidenceGrade.CERTIFIED,
-        ):
-            if artifact.evidence_grade in (
-                EvidenceGrade.EXPLORATORY,
-                EvidenceGrade.TESTED,
-                EvidenceGrade.NUMERICALLY_CROSSCHECKED,
-            ) and (
-                execution_record is None or execution_record.result != "PASS"
-            ):
-                decision = "REJECTED"
-                reject_reason = (
-                    "experimental/numerical evidence cannot promote to formal "
-                    "without authenticated verifier PASS"
-                )
+                        verifier_evidence = {**verifier_evidence, **safe}
 
         snap = self._snapshot(artifact)
         old_isolation = artifact.isolation
@@ -215,21 +255,24 @@ class PromotionGate:
             self.registry.append_promotion(rec)
             return rec
 
-        new_location = old_location
         placed_path: Path | None = None
+        registry_updated = False
+        audit_written = False
 
         try:
             if self.storage is None or self.isolation is None:
                 raise PromotionError("storage/isolation not configured")
 
-            # 1. Source blob
+            # 1–2 source
             blob = self.storage.get_path(artifact.content_hash)
             if sha256_file(blob) != artifact.content_hash:
                 raise PromotionError("source blob hash mismatch")
+            if artifact.size_bytes and blob.stat().st_size != artifact.size_bytes:
+                raise PromotionError("source blob size mismatch")
             if _fail_at == "source_verify":
                 raise PromotionError("injected: source_verify")
 
-            # 2. Destination placement
+            # 3 destination
             placed_path = self.isolation.place_link(
                 artifact.run_id,
                 target_isolation,
@@ -239,40 +282,22 @@ class PromotionGate:
             if _fail_at == "destination_create":
                 raise PromotionError("injected: destination_create")
 
-            # 3. Destination verify
+            # 4 dest verify
             if sha256_file(placed_path) != artifact.content_hash:
                 raise PromotionError("destination content hash mismatch")
-            if placed_path.stat().st_size != artifact.size_bytes and artifact.size_bytes:
+            if artifact.size_bytes and placed_path.stat().st_size != artifact.size_bytes:
                 raise PromotionError("destination size mismatch")
             if _fail_at == "destination_verify":
                 raise PromotionError("injected: destination_verify")
 
             new_location = str(placed_path)
 
-            # 4. Registry update
+            # 5 registry (old path still present)
             artifact.isolation = target_isolation
             artifact.evidence_grade = new_evidence
             artifact.trust = new_trust
             artifact.stored_location = new_location
-            if _fail_at == "registry_update":
-                raise PromotionError("injected: registry_update")
-            # history append after success path builds rec
 
-            # 5. Remove old tier (must succeed for promotion success)
-            if old_isolation != target_isolation and old_location:
-                old_path = Path(old_location)
-                if old_path.exists() and old_path.is_file():
-                    try:
-                        old_path.unlink()
-                    except OSError as e:
-                        raise PromotionError(f"old-tier removal failed: {e}") from e
-                if _fail_at == "old_tier_removal":
-                    raise PromotionError("injected: old_tier_removal")
-                # 6. Confirm gone (or hardlink still valid but path removed)
-                if old_path.exists() and old_path.resolve() != Path(new_location).resolve():
-                    raise PromotionError("old-tier path still accessible after removal")
-
-            # Build success audit before registry write of history
             rec = PromotionRecord(
                 promotion_id=f"promo-{uuid.uuid4().hex[:12]}",
                 artifact_id=artifact.artifact_id,
@@ -292,29 +317,150 @@ class PromotionGate:
                 source_hashes=source_hashes,
             )
             artifact.verification_history.append(rec.as_dict())
-            self.registry.put_artifact(artifact)
 
+            if _fail_at == "registry_update":
+                raise PromotionError("injected: registry_update")
+            self.registry.put_artifact(artifact)
+            registry_updated = True
+
+            # 6 audit BEFORE old-tier removal
             if _fail_at == "audit_append":
                 raise PromotionError("injected: audit_append")
-
-            # 7. Append audit
             self.registry.append_promotion(rec)
+            audit_written = True
+
+            # 7 remove old tier only after durable commit
+            if old_isolation != target_isolation and old_location:
+                old_path = Path(old_location)
+                if old_path.exists() and old_path.is_file():
+                    if old_path.resolve() != Path(new_location).resolve():
+                        if _fail_at == "old_tier_removal":
+                            raise PromotionError("injected: old_tier_removal")
+                        try:
+                            old_path.unlink()
+                        except OSError as e:
+                            # Not success if old exposure remains and is distinct
+                            raise PromotionError(
+                                f"old-tier removal failed: {e}"
+                            ) from e
+
             return rec
 
         except Exception as e:
-            # Rollback filesystem destination
+            # Rollback dest link
             if placed_path is not None and str(placed_path) != old_location:
                 try:
                     if placed_path.exists():
-                        placed_path.unlink()
+                        if placed_path.resolve() != Path(old_location).resolve():
+                            placed_path.unlink()
                 except OSError:
                     pass
+
             # Restore metadata
-            self._restore(artifact, snap)
             try:
+                self._restore(artifact, snap)
                 self.registry.put_artifact(artifact)
-            except Exception:
-                pass
+            except Exception as restore_err:
+                # Recovery-required
+                fail = PromotionRecord(
+                    promotion_id=f"promo-{uuid.uuid4().hex[:12]}",
+                    artifact_id=artifact.artifact_id,
+                    run_id=artifact.run_id,
+                    previous_isolation=old_isolation,
+                    new_isolation=old_isolation,
+                    previous_evidence=snap["evidence_grade"],
+                    new_evidence=snap["evidence_grade"],
+                    previous_trust=snap["trust"],
+                    new_trust=snap["trust"],
+                    policy_rule="promotion_recovery_required",
+                    actor=actor,
+                    reason=(
+                        f"RECOVERY_REQUIRED: promote failed ({e}); "
+                        f"restore failed ({restore_err}); "
+                        f"snapshot_location={old_location}"
+                    ),
+                    decision="REJECTED",
+                    timestamp=_utc_now(),
+                    verifier_evidence={
+                        **verifier_evidence,
+                        "recovery_snapshot": {
+                            "isolation": old_isolation.value,
+                            "stored_location": old_location,
+                        },
+                    },
+                    source_hashes=source_hashes,
+                )
+                try:
+                    self.registry.append_promotion(fail)
+                except Exception:
+                    pass
+                return fail
+
+            # Ensure original path still exists when possible
+            if old_location and not Path(old_location).exists() and self.storage:
+                try:
+                    blob = self.storage.get_path(artifact.content_hash)
+                    # Re-place original exposure
+                    if self.isolation:
+                        restored = self.isolation.place_link(
+                            artifact.run_id,
+                            old_isolation,
+                            artifact.original_filename,
+                            blob,
+                        )
+                        artifact.stored_location = str(restored)
+                        self.registry.put_artifact(artifact)
+                except Exception as re_err:
+                    fail = PromotionRecord(
+                        promotion_id=f"promo-{uuid.uuid4().hex[:12]}",
+                        artifact_id=artifact.artifact_id,
+                        run_id=artifact.run_id,
+                        previous_isolation=old_isolation,
+                        new_isolation=old_isolation,
+                        previous_evidence=snap["evidence_grade"],
+                        new_evidence=snap["evidence_grade"],
+                        previous_trust=snap["trust"],
+                        new_trust=snap["trust"],
+                        policy_rule="promotion_recovery_required",
+                        actor=actor,
+                        reason=(
+                            f"RECOVERY_REQUIRED: path restore failed ({re_err}); "
+                            f"promote error ({e})"
+                        ),
+                        decision="REJECTED",
+                        timestamp=_utc_now(),
+                        verifier_evidence=verifier_evidence,
+                        source_hashes=source_hashes,
+                    )
+                    try:
+                        self.registry.append_promotion(fail)
+                    except Exception:
+                        pass
+                    return fail
+
+            if _fail_at == "rollback_restore":
+                # Force recovery path for tests
+                fail = PromotionRecord(
+                    promotion_id=f"promo-{uuid.uuid4().hex[:12]}",
+                    artifact_id=artifact.artifact_id,
+                    run_id=artifact.run_id,
+                    previous_isolation=old_isolation,
+                    new_isolation=old_isolation,
+                    previous_evidence=snap["evidence_grade"],
+                    new_evidence=snap["evidence_grade"],
+                    previous_trust=snap["trust"],
+                    new_trust=snap["trust"],
+                    policy_rule="promotion_recovery_required",
+                    actor=actor,
+                    reason="RECOVERY_REQUIRED: injected rollback_restore",
+                    decision="REJECTED",
+                    timestamp=_utc_now(),
+                    verifier_evidence=verifier_evidence,
+                    source_hashes=source_hashes,
+                )
+                self.registry.append_promotion(fail)
+                return fail
+
             fail = PromotionRecord(
                 promotion_id=f"promo-{uuid.uuid4().hex[:12]}",
                 artifact_id=artifact.artifact_id,
@@ -336,5 +482,6 @@ class PromotionGate:
             try:
                 self.registry.append_promotion(fail)
             except Exception:
+                # Audit failure after successful restore still reports REJECTED
                 pass
             return fail
