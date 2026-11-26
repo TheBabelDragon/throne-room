@@ -1,0 +1,14 @@
+# Isolation boundaries (v0.1)
+
+tiers:
+  quarantine: storage isolation for untrusted / newly ingested material
+  sandbox: experimental and numerical evidence; process-boundary policy only
+  validated: schema and integrity checks passed
+  certified: independently verified formal certificates (read-only)
+  rejected: failed integrity or policy; retained for audit
+
+limitations:
+  - Sandboxing in v0.1 is a storage and process-boundary policy.
+  - Filesystem segregation alone is not secure code isolation.
+  - No automatic execution of ingested artifacts.
+  - Archives are treated as untrusted; member paths are inspected before any extraction.

@@ -1,0 +1,22 @@
+# Default routing policy (v0.1)
+# Implemented in code by ArtifactRouter; this file documents the table.
+
+rules:
+  - condition: unknown_source_or_invalid_manifest
+    destination: quarantine
+  - condition: newly_ingested
+    destination: quarantine
+  - condition: experimental_run
+    destination: sandbox
+  - condition: validated_schema_and_checks
+    destination: validated
+  - condition: independently_verified_formal_certificate
+    destination: certified
+  - condition: failed_integrity_or_policy
+    destination: rejected
+
+notes:
+  - Promotion is always explicit via PromotionGate.
+  - Callers cannot bypass policy by requesting a destination directory.
+  - FORMALLY_PROVED / CERTIFIED require verifier_id, verifier_version,
+    theorem/proof target, verification_result=PASS, and certificate_hash.

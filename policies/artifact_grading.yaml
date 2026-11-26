@@ -1,0 +1,30 @@
+# Independent classification dimensions
+
+trust:
+  - UNTRUSTED
+  - TRUSTED
+
+evidence_grade:
+  - EXPLORATORY
+  - TESTED
+  - NUMERICALLY_CROSSCHECKED
+  - FORMALLY_PROVED
+  - CERTIFIED
+
+isolation:
+  - QUARANTINED
+  - SANDBOXED
+  - VALIDATED
+  - CERTIFIED_READ_ONLY
+  - REJECTED
+
+sensitivity:
+  - PUBLIC
+  - INTERNAL
+  - RESTRICTED
+
+rules:
+  - An artifact may be NUMERICALLY_CROSSCHECKED while remaining UNTRUSTED and SANDBOXED.
+  - FORMALLY_PROVED does not automatically imply CERTIFIED implementation.
+  - A successful experiment never becomes a mathematical proof.
+  - No artifact may assign itself a higher trust or evidence grade through its own manifest.
