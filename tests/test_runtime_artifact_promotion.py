@@ -6,16 +6,30 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from throne_runtime.artifacts.manifest import attach_manifest_hash
 from throne_runtime.artifacts.models import (
     ArtifactRecord,
     EvidenceGrade,
     Isolation,
+    RunManifest,
     Sensitivity,
     Trust,
 )
 from throne_runtime.artifacts.promotion import PromotionGate
 from throne_runtime.artifacts.registry import Registry
 from throne_runtime.artifacts.router import ArtifactRouter
+
+
+def _seed_run(reg: Registry, run_id: str = "run-1") -> None:
+    m = RunManifest(
+        run_id=run_id,
+        project="P",
+        subsystem="s",
+        run_type="t",
+        created_at="t",
+    )
+    attach_manifest_hash(m)
+    reg.put_run(m)
 
 
 def _art(**kwargs):
@@ -43,6 +57,7 @@ class TestPromotion(unittest.TestCase):
     def test_experimental_cannot_self_promote_to_proof(self):
         with tempfile.TemporaryDirectory() as td:
             reg = Registry(Path(td) / "r.sqlite3")
+            _seed_run(reg)
             gate = PromotionGate(reg, ArtifactRouter())
             art = _art(evidence_grade=EvidenceGrade.NUMERICALLY_CROSSCHECKED)
             reg.put_artifact(art)
@@ -58,6 +73,7 @@ class TestPromotion(unittest.TestCase):
     def test_certificate_filename_alone_insufficient(self):
         with tempfile.TemporaryDirectory() as td:
             reg = Registry(Path(td) / "r.sqlite3")
+            _seed_run(reg)
             gate = PromotionGate(reg, ArtifactRouter())
             art = _art()
             reg.put_artifact(art)
@@ -74,6 +90,7 @@ class TestPromotion(unittest.TestCase):
         """Hardening: verification_result=PASS without execution record is REJECTED."""
         with tempfile.TemporaryDirectory() as td:
             reg = Registry(Path(td) / "r.sqlite3")
+            _seed_run(reg)
             gate = PromotionGate(reg, ArtifactRouter())
             art = _art()
             reg.put_artifact(art)
@@ -99,6 +116,7 @@ class TestPromotion(unittest.TestCase):
     def test_rejected_remains_traceable(self):
         with tempfile.TemporaryDirectory() as td:
             reg = Registry(Path(td) / "r.sqlite3")
+            _seed_run(reg)
             gate = PromotionGate(reg, ArtifactRouter())
             art = _art()
             reg.put_artifact(art)
