@@ -70,7 +70,8 @@ class TestPromotion(unittest.TestCase):
             )
             self.assertEqual(rec.decision, "REJECTED")
 
-    def test_formal_requires_verifier_evidence(self):
+    def test_caller_attested_pass_insufficient_for_certified(self):
+        """Hardening: verification_result=PASS without execution record is REJECTED."""
         with tempfile.TemporaryDirectory() as td:
             reg = Registry(Path(td) / "r.sqlite3")
             gate = PromotionGate(reg, ArtifactRouter())
@@ -90,10 +91,10 @@ class TestPromotion(unittest.TestCase):
                     "verification_result": "PASS",
                 },
             )
-            self.assertEqual(rec.decision, "ALLOWED")
+            self.assertEqual(rec.decision, "REJECTED")
             history = reg.list_promotions(artifact_id="art-1")
             self.assertEqual(len(history), 1)
-            self.assertEqual(history[0].decision, "ALLOWED")
+            self.assertEqual(history[0].decision, "REJECTED")
 
     def test_rejected_remains_traceable(self):
         with tempfile.TemporaryDirectory() as td:
@@ -110,7 +111,6 @@ class TestPromotion(unittest.TestCase):
             hist = reg.list_promotions(artifact_id="art-1")
             self.assertEqual(len(hist), 1)
             self.assertEqual(hist[0].decision, "REJECTED")
-            # Original isolation unchanged
             loaded = reg.get_artifact("art-1")
             self.assertEqual(loaded.isolation, Isolation.QUARANTINED)
 
