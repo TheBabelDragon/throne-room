@@ -13,6 +13,9 @@ from throne_runtime.artifacts.manifest import (
     write_manifest,
 )
 from throne_runtime.artifacts.models import RunManifest, RunStatus
+from throne_runtime.artifacts.service import ArtifactService
+
+_POLICY = Path(__file__).resolve().parents[1] / "policies"
 
 
 class TestManifest(unittest.TestCase):
@@ -37,10 +40,8 @@ class TestManifest(unittest.TestCase):
             self.assertEqual(compute_manifest_hash(loaded), loaded.manifest_hash)
 
     def test_unique_run_ids(self):
-        from throne_runtime.artifacts.service import ArtifactService
-
         with tempfile.TemporaryDirectory() as td:
-            svc = ArtifactService(root=Path(td))
+            svc = ArtifactService(root=Path(td), policy_dir=_POLICY)
             a = svc.create_run(project="P", subsystem="s", run_type="t")
             b = svc.create_run(project="P", subsystem="s", run_type="t")
             self.assertNotEqual(a.run_id, b.run_id)

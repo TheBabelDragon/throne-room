@@ -9,12 +9,18 @@ from pathlib import Path
 from throne_runtime.artifacts.models import Isolation
 from throne_runtime.artifacts.service import ArtifactService
 
+_POLICY = Path(__file__).resolve().parents[1] / "policies"
+
+
+def _svc(root: Path) -> ArtifactService:
+    return ArtifactService(root=root, policy_dir=_POLICY)
+
 
 class TestService(unittest.TestCase):
     def test_ingest_and_list(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            svc = ArtifactService(root=root)
+            svc = _svc(root)
             run = svc.create_run(project="Spacetime", subsystem="test", run_type="unit")
             f = root / "sample.txt"
             f.write_text("hello artifacts")
@@ -27,7 +33,7 @@ class TestService(unittest.TestCase):
     def test_verify_and_export(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            svc = ArtifactService(root=root)
+            svc = _svc(root)
             run = svc.create_run(project="P", subsystem="s", run_type="t")
             f = root / "out.bin"
             f.write_bytes(b"\x00\x01\x02")
@@ -41,7 +47,7 @@ class TestService(unittest.TestCase):
 
     def test_lineage_parent_run(self):
         with tempfile.TemporaryDirectory() as td:
-            svc = ArtifactService(root=Path(td))
+            svc = _svc(Path(td))
             parent = svc.create_run(project="P", subsystem="s", run_type="t")
             child = svc.create_run(
                 project="P", subsystem="s", run_type="t", parent_run=parent.run_id

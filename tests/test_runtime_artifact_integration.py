@@ -1,4 +1,4 @@
-"""Integration: concurrent-ish safety, full flow, no impact when unused."""
+"""Integration: concurrent safety, full flow."""
 
 from __future__ import annotations
 
@@ -9,12 +9,14 @@ from pathlib import Path
 
 from throne_runtime.artifacts.service import ArtifactService
 
+_POLICY = Path(__file__).resolve().parents[1] / "policies"
+
 
 class TestIntegration(unittest.TestCase):
     def test_concurrent_ingest(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            svc = ArtifactService(root=root)
+            svc = ArtifactService(root=root, policy_dir=_POLICY)
             run = svc.create_run(project="P", subsystem="s", run_type="t")
             errors: list[BaseException] = []
 
@@ -36,7 +38,6 @@ class TestIntegration(unittest.TestCase):
             self.assertEqual(len(arts), 8)
 
     def test_import_does_not_require_network(self):
-        # Smoke: importing the package must not touch the network.
         import throne_runtime.artifacts  # noqa: F401
 
 
