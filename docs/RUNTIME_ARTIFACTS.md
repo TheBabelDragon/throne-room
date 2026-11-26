@@ -48,6 +48,21 @@ All registry, journal, and lock tables share one database file configured by
   single-host** filesystem for the database and blob store.
 - Multi-host distributed locking or remote databases (out of scope for v0.1).
 
+### Artifact lease semantics
+
+Leases coordinate **local processes** on a shared SQLite file. They are not a
+distributed lock for independent hosts on network filesystems.
+
+| Rule | Behavior |
+|------|----------|
+| Ownership | Established by **owner + unique token** |
+| Renewal | Valid only while `expires_at > now` and owner/token match |
+| Expiry | Expired leases cannot be renewed; they are reclaimable by a new acquirer |
+| Release | Same owner+token deletes the row; **repeated release is idempotent** |
+| Mismatch | Wrong owner or token on release/renew raises `LockError` |
+
+Long-running promotions should call `locks.renew(lease)` before TTL elapses.
+
 ### Checkpoints
 
 - Ordinary paths use SQLite’s automatic checkpointing.
