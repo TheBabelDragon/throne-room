@@ -1,5 +1,5 @@
 # Default routing policy (v0.1)
-# Implemented in code by ArtifactRouter; this file documents the table.
+version: 1
 
 rules:
   - condition: unknown_source_or_invalid_manifest
@@ -18,5 +18,4 @@ rules:
 notes:
   - Promotion is always explicit via PromotionGate.
   - Callers cannot bypass policy by requesting a destination directory.
-  - FORMALLY_PROVED / CERTIFIED require verifier_id, verifier_version,
-    theorem/proof target, verification_result=PASS, and certificate_hash.
+  - CERTIFIED requires authenticated verifier execution records, not caller-attested PASS.
