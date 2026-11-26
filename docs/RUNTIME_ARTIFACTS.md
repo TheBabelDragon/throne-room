@@ -14,8 +14,9 @@ artifacts, recording provenance, and distributing them into appropriate storage.
 ingest → scan (path/symlink/archive safety) → content-addressed blob store
       → registry record (QUARANTINED)
       → optional checks / verify
-      → PromotionGate (only path to change tier/grade)
-      → isolation tier directories + audit log
+      → VerifierAdapter execution (when required)
+      → PromotionGate (only path to change tier/grade; real storage move)
+      → isolation tier directories + append-only audit log
 ```
 
 Package layout:
@@ -27,68 +28,54 @@ throne_runtime/artifacts/
   hashing.py      # SHA-256 content addressing
   scanner.py      # path traversal / symlink / archive safety
   isolation.py    # tier directories (quarantine/sandbox/validated/certified/rejected)
-  registry.py     # SQLite runs / artifacts / promotions
-  router.py       # policy-driven routing decisions
-  promotion.py    # PromotionGate + append-only audit
-  verifier.py     # integrity + formal-evidence presence checks
+  registry.py     # SQLite UPSERT runs / artifacts / promotions / verification records
+  router.py       # YAML policy-driven routing decisions
+  policy.py       # load/validate artifact_routing.yaml
+  promotion.py    # PromotionGate + permitted transitions + storage move
+  verifier.py     # integrity verification (missing blobs fail)
+  verifiers.py    # VerifierAdapter contract + execution records
   storage.py      # LocalBlobStorage + StorageBackend protocol
   service.py      # ArtifactService public API
   cli.py          # throne-artifacts entrypoint
 ```
 
-Runtime layout under `runtime/artifacts/`:
+## Verifier guarantees (critical)
 
-```
-intake/ quarantine/ sandbox/ validated/ certified/ rejected/
-blobs/  runs/  registry.sqlite3
-```
+- A caller **cannot** establish certification by passing `verification_result=PASS`.
+- Certification requires a **VerifierAdapter** that actually executes (or invokes)
+  an independently trusted process and returns a sealed `VerificationExecutionRecord`.
+- Records bind: artifact SHA-256, source commit, proof target, verifier id/version.
+- `record_hash` seals the binding; mismatched or replayed records are rejected.
+- Unsupported verifier types (including Lean in v0.1) return `UNSUPPORTED` and
+  cannot satisfy CERTIFIED / FORMALLY_PROVED gates.
+- Certificate filename or hash alone is never sufficient.
 
-## Manifest schema
+## Classification authority
 
-```json
-{
-  "schema": "throne.runtime.artifact-manifest",
-  "version": 1,
-  "run_id": "run-…",
-  "project": "Spacetime",
-  "subsystem": "formal_verification",
-  "run_type": "lean_build",
-  "created_at": "UTC ISO-8601",
-  "source_commit": "…",
-  "parent_run": null,
-  "trust": "UNTRUSTED",
-  "evidence_grade": "EXPLORATORY",
-  "isolation": "QUARANTINED",
-  "sensitivity": "INTERNAL",
-  "inputs": [],
-  "outputs": [],
-  "checks": [],
-  "provenance": {},
-  "status": "COMPLETED",
-  "manifest_hash": "sha256…"
-}
-```
+Incoming `trust=TRUSTED` or `evidence_grade=FORMALLY_PROVED|CERTIFIED` on
+`create_run` are treated as claims and forced back to UNTRUSTED / EXPLORATORY.
+Only PromotionGate may elevate classification, and only with the appropriate
+execution evidence.
 
-Malformed or unknown required fields are rejected. Manifests of failed runs are retained.
+## Promotion storage transition
 
-## Classification dimensions
+PromotionGate:
 
-| Axis | Values |
-|------|--------|
-| Trust | UNTRUSTED, TRUSTED |
-| Evidence | EXPLORATORY, TESTED, NUMERICALLY_CROSSCHECKED, FORMALLY_PROVED, CERTIFIED |
-| Isolation | QUARANTINED, SANDBOXED, VALIDATED, CERTIFIED_READ_ONLY, REJECTED |
-| Sensitivity | PUBLIC, INTERNAL, RESTRICTED |
+1. Validates permitted isolation transitions.
+2. Requires integrity execution evidence for VALIDATED.
+3. Requires independent verifier PASS execution record for CERTIFIED_READ_ONLY.
+4. Places content into the destination tier and verifies destination hash.
+5. Updates registry metadata.
+6. Removes old-tier layout exposure after successful update.
+7. On failure, rolls metadata back and appends a ROLLBACK audit entry.
 
-These axes are independent. Numerical cross-checking does not imply formal proof.
-Self-declared high grades in a manifest do not grant promotion.
+Audit history is append-only and never erased.
 
 ## Routing policy
 
-See `policies/artifact_routing.yaml`. Default: new material → quarantine.
-Experimental evidence → sandbox after checks. Formal certification requires
-PromotionGate with verifier identity, version, target, PASS result, and
-certificate hash. A certificate filename alone is insufficient.
+YAML files under `policies/` are loaded at service init. New intake is always
+quarantined. Failed checks route toward rejected. Formal claims are never
+auto-promoted.
 
 ## Isolation boundaries and limitations
 
@@ -100,13 +87,8 @@ artifacts. Archives are inspected for path escapes before any extraction.
 
 SHA-256 blobs under `blobs/ab/cd/<hash>`. Identical content deduplicates.
 Registry metadata is separate. Writes use temporary staging + atomic replace.
-
-## Promotion rules
-
-`PromotionGate` is the only supported mechanism for changing classification or
-tier. Every decision (ALLOWED or REJECTED) is appended to the audit log with
-previous/new values, actor, policy rule, verifier evidence, and timestamps.
-History is never erased on rejection or downgrade.
+Run updates use SQLite `ON CONFLICT DO UPDATE` (UPSERT) so foreign keys to
+artifacts are preserved.
 
 ## Python API
 
@@ -124,7 +106,8 @@ run = svc.create_run(
 art = svc.ingest(run_id=run.run_id, path=Path("build.log"))
 svc.add_check(run_id=run.run_id, name="lean_build", status="PASS")
 result = svc.verify(run_id=run.run_id)
-svc.list_runs(project="Spacetime")
+# Promotion requires real verifier execution for high tiers
+svc.promote(art.artifact_id, target="VALIDATED", actor="operator")
 svc.export_run(run.run_id, destination=Path("export"))
 ```
 
@@ -146,17 +129,18 @@ throne-artifacts audit RUN_ID
 
 Additive only. Does not replace Duck Workbench `ObjectStore`, Millennium Lab
 evidence semantics, observer journals, Field Intelligence live paths, or Qwuack
-ownership. Optional export helpers may be added later for snapshots/reports
-without moving operational journals. Yang–Mills Lean certificate artifact type
-is future-compatible; this release does not claim formal certificates exist.
+ownership. Yang–Mills Lean certificate artifact type is future-compatible;
+this release does not claim formal certificates exist and does not invoke Lean.
 
 ## Recovery and integrity
 
-- Re-hash blobs on verify; mismatch fails the run.
+- Re-hash blobs on verify; missing or mismatched blobs fail the run.
+- Manifest hash verified on registry retrieval.
 - Registry survives process restart (SQLite).
 - Export bundles include manifest, artifacts, and promotion audit.
 
 ## Future distributed storage
 
 `StorageBackend` protocol allows remote/object-store backends without rewriting
-`ArtifactService`.
+`ArtifactService`. Additional VerifierAdapter implementations (real Lean, pytest
+harness, etc.) register into `VerifierRegistry`.
