@@ -105,6 +105,7 @@ class Registry:
                     CREATE TABLE IF NOT EXISTS verification_records (
                         record_id TEXT PRIMARY KEY,
                         record_hash TEXT NOT NULL UNIQUE,
+                        nonce TEXT,
                         artifact_id TEXT NOT NULL,
                         content_hash TEXT NOT NULL,
                         payload_json TEXT NOT NULL,
@@ -113,6 +114,8 @@ class Registry:
 
                     CREATE INDEX IF NOT EXISTS idx_ver_records_artifact
                         ON verification_records(artifact_id);
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_ver_records_nonce
+                        ON verification_records(nonce) WHERE nonce IS NOT NULL AND nonce != '';
                     """
                 )
                 conn.commit()
@@ -120,7 +123,6 @@ class Registry:
                 conn.close()
 
     def put_run(self, manifest: RunManifest) -> None:
-        """UPSERT run — never delete/recreate a referenced parent row."""
         with self._lock:
             conn = self._connect()
             try:
@@ -179,13 +181,11 @@ class Registry:
                     return None
                 data = json.loads(row["manifest_json"])
                 m = RunManifest.from_dict(data)
-                # Integrity: recompute and compare stored hash
                 expected = compute_manifest_hash(m)
                 stored = row["manifest_hash"] or m.manifest_hash
                 if stored and stored != expected:
                     raise ValueError(
-                        f"corrupted manifest for {run_id}: "
-                        f"stored hash mismatch"
+                        f"corrupted manifest for {run_id}: stored hash mismatch"
                     )
                 return m
             finally:
@@ -209,7 +209,6 @@ class Registry:
                 conn.close()
 
     def put_artifact(self, rec: ArtifactRecord) -> None:
-        """UPSERT artifact — preserve row identity under concurrent updates."""
         with self._lock:
             conn = self._connect()
             try:
@@ -388,10 +387,12 @@ class Registry:
                 conn.close()
 
     def persist_verification_record(self, record_dict: dict[str, Any]) -> None:
-        """Store a sealed verification execution record; reject hash collisions (replay)."""
         record_hash = record_dict.get("record_hash") or ""
+        nonce = record_dict.get("nonce") or ""
         if not record_hash:
             raise ValueError("verification record missing record_hash")
+        if not record_dict.get("signature"):
+            raise ValueError("verification record missing signature")
         with self._lock:
             conn = self._connect()
             try:
@@ -401,16 +402,24 @@ class Registry:
                 ).fetchone()
                 if existing:
                     raise ValueError("replayed verification record rejected")
+                if nonce:
+                    existing_n = conn.execute(
+                        "SELECT record_id FROM verification_records WHERE nonce = ?",
+                        (nonce,),
+                    ).fetchone()
+                    if existing_n:
+                        raise ValueError("replayed verification record rejected (nonce)")
                 conn.execute(
                     """
                     INSERT INTO verification_records (
-                        record_id, record_hash, artifact_id, content_hash,
+                        record_id, record_hash, nonce, artifact_id, content_hash,
                         payload_json, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         record_dict["record_id"],
                         record_hash,
+                        nonce,
                         record_dict["artifact_id"],
                         record_dict["content_hash"],
                         json.dumps(record_dict, sort_keys=True),
@@ -430,5 +439,17 @@ class Registry:
                     (artifact_id,),
                 ).fetchall()
                 return {r["record_hash"] for r in rows}
+            finally:
+                conn.close()
+
+    def seen_verification_nonces(self, artifact_id: str) -> set[str]:
+        with self._lock:
+            conn = self._connect()
+            try:
+                rows = conn.execute(
+                    "SELECT nonce FROM verification_records WHERE artifact_id = ? AND nonce IS NOT NULL AND nonce != ''",
+                    (artifact_id,),
+                ).fetchall()
+                return {r["nonce"] for r in rows}
             finally:
                 conn.close()
