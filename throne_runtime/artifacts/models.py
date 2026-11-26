@@ -188,8 +188,8 @@ class RunManifest:
             raw = d.get(key, default.value)
             try:
                 return enum_cls(raw)
-            except ValueError as exc:
-                raise ValueError(f"invalid {key}: {raw!r}") from exp
+            except ValueError as e:
+                raise ValueError(f"invalid {key}: {raw!r}") from e
 
         return cls(
             schema=str(d["schema"]),
