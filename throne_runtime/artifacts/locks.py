@@ -1,8 +1,4 @@
-"""Cross-process artifact promotion locks (SQLite lease with renewal).
-
-Ownership = (owner, token). Release is idempotent when the row is already
-gone. Renewal requires the lease to still be unexpired.
-"""
+"""Cross-process artifact promotion locks (SQLite lease with renewal)."""
 
 from __future__ import annotations
 
@@ -14,6 +10,8 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
+
+from .schema import apply_locks_schema
 
 if TYPE_CHECKING:
     from .sqlite_db import Database
@@ -36,8 +34,6 @@ class Lease:
 
 
 class ArtifactLockManager:
-    """Per-artifact cross-process locks backed by SQLite leases."""
-
     def __init__(
         self,
         db_path: Path | None = None,
@@ -59,24 +55,11 @@ class ArtifactLockManager:
         self._lock = lock or threading.RLock()
         self._owner = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
         self._clock = clock or time.time
-        self._ensure_schema()
+        with self._lock:
+            apply_locks_schema(self.db)
 
     def _now(self) -> float:
         return float(self._clock())
-
-    def _ensure_schema(self) -> None:
-        with self._lock:
-            with self.db.write_transaction() as conn:
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS artifact_locks (
-                        artifact_id TEXT PRIMARY KEY,
-                        owner TEXT NOT NULL,
-                        token TEXT NOT NULL,
-                        expires_at REAL NOT NULL
-                    )
-                    """
-                )
 
     def acquire(
         self,
@@ -126,10 +109,6 @@ class ArtifactLockManager:
             time.sleep(0.05)
 
     def renew(self, lease: Lease, *, ttl_s: float | None = None) -> Lease:
-        """Extend lease only if still owned *and* unexpired.
-
-        Does not mutate ``lease`` unless the UPDATE succeeds.
-        """
         ttl = self.default_ttl_s if ttl_s is None else ttl_s
         now = self._now()
         expires = now + ttl
@@ -144,13 +123,7 @@ class ArtifactLockManager:
                       AND token = ?
                       AND expires_at > ?
                     """,
-                    (
-                        expires,
-                        lease.artifact_id,
-                        lease.owner,
-                        lease.token,
-                        now,
-                    ),
+                    (expires, lease.artifact_id, lease.owner, lease.token, now),
                 )
                 if cur.rowcount != 1:
                     raise LockError(
@@ -160,7 +133,6 @@ class ArtifactLockManager:
         return lease
 
     def release(self, lease: Lease) -> None:
-        """Release if still owned. Idempotent if the row is already absent."""
         with self._lock:
             with self.db.write_transaction() as conn:
                 row = conn.execute(
@@ -168,7 +140,7 @@ class ArtifactLockManager:
                     (lease.artifact_id,),
                 ).fetchone()
                 if row is None:
-                    return  # already released / reclaimed / never held
+                    return
                 if row["owner"] != lease.owner or row["token"] != lease.token:
                     raise LockError("lock ownership mismatch on release")
                 conn.execute(

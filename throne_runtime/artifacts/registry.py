@@ -18,6 +18,7 @@ from .models import (
     Sensitivity,
     Trust,
 )
+from .schema import apply_registry_schema
 from .sqlite_db import Database, SQLiteSettings
 
 
@@ -35,93 +36,11 @@ class Registry:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self.db = database or Database(self.db_path, settings=settings)
-        self._init_schema()
+        with self._lock:
+            apply_registry_schema(self.db)
 
     def _connect(self) -> sqlite3.Connection:
         return self.db.connect()
-
-    def _init_schema(self) -> None:
-        with self._lock:
-            with self.db.write_transaction() as conn:
-                conn.executescript(
-                    """
-                    CREATE TABLE IF NOT EXISTS runs (
-                        run_id TEXT PRIMARY KEY,
-                        project TEXT NOT NULL,
-                        subsystem TEXT NOT NULL,
-                        run_type TEXT NOT NULL,
-                        created_at TEXT NOT NULL,
-                        source_commit TEXT,
-                        parent_run TEXT,
-                        trust TEXT NOT NULL,
-                        evidence_grade TEXT NOT NULL,
-                        isolation TEXT NOT NULL,
-                        sensitivity TEXT NOT NULL,
-                        status TEXT NOT NULL,
-                        manifest_json TEXT NOT NULL,
-                        manifest_hash TEXT
-                    );
-
-                    CREATE TABLE IF NOT EXISTS artifacts (
-                        artifact_id TEXT PRIMARY KEY,
-                        run_id TEXT NOT NULL,
-                        content_hash TEXT NOT NULL,
-                        original_filename TEXT NOT NULL,
-                        stored_location TEXT NOT NULL,
-                        media_type TEXT,
-                        size_bytes INTEGER,
-                        source_subsystem TEXT,
-                        parent_run TEXT,
-                        trust TEXT NOT NULL,
-                        evidence_grade TEXT NOT NULL,
-                        isolation TEXT NOT NULL,
-                        sensitivity TEXT NOT NULL,
-                        created_at TEXT NOT NULL,
-                        verification_history TEXT,
-                        FOREIGN KEY (run_id) REFERENCES runs(run_id)
-                    );
-
-                    CREATE INDEX IF NOT EXISTS idx_artifacts_run ON artifacts(run_id);
-                    CREATE INDEX IF NOT EXISTS idx_artifacts_hash ON artifacts(content_hash);
-
-                    CREATE TABLE IF NOT EXISTS promotions (
-                        promotion_id TEXT PRIMARY KEY,
-                        artifact_id TEXT NOT NULL,
-                        run_id TEXT NOT NULL,
-                        previous_isolation TEXT,
-                        new_isolation TEXT,
-                        previous_evidence TEXT,
-                        new_evidence TEXT,
-                        previous_trust TEXT,
-                        new_trust TEXT,
-                        policy_rule TEXT,
-                        actor TEXT,
-                        reason TEXT,
-                        decision TEXT,
-                        timestamp TEXT NOT NULL,
-                        verifier_evidence TEXT,
-                        source_hashes TEXT
-                    );
-
-                    CREATE INDEX IF NOT EXISTS idx_promotions_artifact ON promotions(artifact_id);
-
-                    CREATE TABLE IF NOT EXISTS verification_records (
-                        record_id TEXT PRIMARY KEY,
-                        record_hash TEXT NOT NULL UNIQUE,
-                        nonce TEXT,
-                        artifact_id TEXT NOT NULL,
-                        content_hash TEXT NOT NULL,
-                        payload_json TEXT NOT NULL,
-                        created_at TEXT NOT NULL
-                    );
-
-                    CREATE INDEX IF NOT EXISTS idx_ver_records_artifact
-                        ON verification_records(artifact_id);
-                    CREATE UNIQUE INDEX IF NOT EXISTS idx_ver_records_nonce
-                        ON verification_records(nonce)
-                        WHERE nonce IS NOT NULL AND nonce != '';
-                    """
-                )
 
     def put_run(self, manifest: RunManifest) -> None:
         with self._lock:

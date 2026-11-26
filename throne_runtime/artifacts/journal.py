@@ -9,6 +9,8 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .schema import apply_journal_schema
+
 if TYPE_CHECKING:
     from .sqlite_db import Database
 
@@ -97,47 +99,8 @@ class PromotionJournal:
             self.db = Database(db_path)
         self.db_path = self.db.path
         self._lock = lock or threading.RLock()
-        self._ensure_schema()
-
-    def _ensure_schema(self) -> None:
         with self._lock:
-            with self.db.write_transaction() as conn:
-                conn.executescript(
-                    """
-                    CREATE TABLE IF NOT EXISTS promotion_journal (
-                        promotion_id TEXT PRIMARY KEY,
-                        artifact_id TEXT NOT NULL,
-                        run_id TEXT NOT NULL,
-                        state TEXT NOT NULL,
-                        old_isolation TEXT NOT NULL,
-                        new_isolation TEXT NOT NULL,
-                        old_location TEXT,
-                        new_location TEXT,
-                        content_hash TEXT NOT NULL,
-                        size_bytes INTEGER NOT NULL,
-                        original_filename TEXT NOT NULL,
-                        actor TEXT,
-                        reason TEXT,
-                        snapshot_json TEXT NOT NULL,
-                        updated_at TEXT NOT NULL,
-                        detail TEXT,
-                        retry_count INTEGER DEFAULT 0
-                    );
-                    CREATE INDEX IF NOT EXISTS idx_journal_artifact
-                        ON promotion_journal(artifact_id);
-                    CREATE INDEX IF NOT EXISTS idx_journal_state
-                        ON promotion_journal(state);
-                    """
-                )
-                cols = {
-                    r[1]
-                    for r in conn.execute("PRAGMA table_info(promotion_journal)").fetchall()
-                }
-                if "retry_count" not in cols:
-                    conn.execute(
-                        "ALTER TABLE promotion_journal "
-                        "ADD COLUMN retry_count INTEGER DEFAULT 0"
-                    )
+            apply_journal_schema(self.db)
 
     def put(self, entry: JournalEntry) -> None:
         entry.updated_at = _utc_now()
