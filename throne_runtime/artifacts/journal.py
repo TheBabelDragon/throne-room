@@ -1,12 +1,7 @@
-"""Durable promotion journal for crash-consistent isolation transitions.
-
-Filesystem and SQLite are not one atomic domain. The journal records
-explicit states so startup recovery can reconcile incomplete promotions.
-"""
+"""Durable promotion journal for crash-consistent isolation transitions."""
 
 from __future__ import annotations
 
-import json
 import sqlite3
 import threading
 from dataclasses import dataclass
@@ -32,10 +27,10 @@ class JournalState(str, Enum):
     ROLLED_BACK = "ROLLED_BACK"
 
 
+# Only truly terminal states — RECOVERY_REQUIRED remains visible to recovery.
 TERMINAL_STATES = frozenset(
     {
         JournalState.COMPLETED,
-        JournalState.RECOVERY_REQUIRED,
         JournalState.ROLLED_BACK,
     }
 )
@@ -59,6 +54,7 @@ class JournalEntry:
     snapshot_json: str
     updated_at: str
     detail: str = ""
+    retry_count: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -78,12 +74,11 @@ class JournalEntry:
             "snapshot_json": self.snapshot_json,
             "updated_at": self.updated_at,
             "detail": self.detail,
+            "retry_count": self.retry_count,
         }
 
 
 class PromotionJournal:
-    """SQLite-backed promotion journal (shared connection path with Registry)."""
-
     def __init__(self, db_path: Path, lock: threading.RLock | None = None) -> None:
         self.db_path = Path(db_path)
         self._lock = lock or threading.RLock()
@@ -118,7 +113,8 @@ class PromotionJournal:
                         reason TEXT,
                         snapshot_json TEXT NOT NULL,
                         updated_at TEXT NOT NULL,
-                        detail TEXT
+                        detail TEXT,
+                        retry_count INTEGER DEFAULT 0
                     );
                     CREATE INDEX IF NOT EXISTS idx_journal_artifact
                         ON promotion_journal(artifact_id);
@@ -126,6 +122,15 @@ class PromotionJournal:
                         ON promotion_journal(state);
                     """
                 )
+                # Idempotent column add for pre-migration DBs
+                cols = {
+                    r[1]
+                    for r in conn.execute("PRAGMA table_info(promotion_journal)").fetchall()
+                }
+                if "retry_count" not in cols:
+                    conn.execute(
+                        "ALTER TABLE promotion_journal ADD COLUMN retry_count INTEGER DEFAULT 0"
+                    )
                 conn.commit()
             finally:
                 conn.close()
@@ -141,15 +146,16 @@ class PromotionJournal:
                         promotion_id, artifact_id, run_id, state,
                         old_isolation, new_isolation, old_location, new_location,
                         content_hash, size_bytes, original_filename,
-                        actor, reason, snapshot_json, updated_at, detail
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        actor, reason, snapshot_json, updated_at, detail, retry_count
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(promotion_id) DO UPDATE SET
                         state=excluded.state,
                         old_location=excluded.old_location,
                         new_location=excluded.new_location,
                         updated_at=excluded.updated_at,
                         detail=excluded.detail,
-                        snapshot_json=excluded.snapshot_json
+                        snapshot_json=excluded.snapshot_json,
+                        retry_count=excluded.retry_count
                     """,
                     (
                         entry.promotion_id,
@@ -168,6 +174,7 @@ class PromotionJournal:
                         entry.snapshot_json,
                         entry.updated_at,
                         entry.detail,
+                        entry.retry_count,
                     ),
                 )
                 conn.commit()
@@ -189,6 +196,7 @@ class PromotionJournal:
                 conn.close()
 
     def list_incomplete(self) -> list[JournalEntry]:
+        """Non-terminal entries, including RECOVERY_REQUIRED for retry."""
         with self._lock:
             conn = self._connect()
             try:
@@ -203,7 +211,20 @@ class PromotionJournal:
             finally:
                 conn.close()
 
+    def list_recovery_required(self) -> list[JournalEntry]:
+        with self._lock:
+            conn = self._connect()
+            try:
+                rows = conn.execute(
+                    "SELECT * FROM promotion_journal WHERE state = ? ORDER BY updated_at",
+                    (JournalState.RECOVERY_REQUIRED.value,),
+                ).fetchall()
+                return [self._row(r) for r in rows]
+            finally:
+                conn.close()
+
     def _row(self, row: sqlite3.Row) -> JournalEntry:
+        keys = row.keys()
         return JournalEntry(
             promotion_id=row["promotion_id"],
             artifact_id=row["artifact_id"],
@@ -221,4 +242,5 @@ class PromotionJournal:
             snapshot_json=row["snapshot_json"],
             updated_at=row["updated_at"],
             detail=row["detail"] or "",
+            retry_count=int(row["retry_count"] if "retry_count" in keys else 0),
         )
