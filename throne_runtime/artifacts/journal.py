@@ -1,0 +1,199 @@
+"""Durable promotion journal (shared Database / WAL)."""
+
+from __future__ import annotations
+
+import threading
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from enum import Enum
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+from .schema import apply_journal_schema
+
+if TYPE_CHECKING:
+    from .sqlite_db import Database
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+class JournalState(str, Enum):
+    PREPARED = "PREPARED"
+    DESTINATION_CREATED = "DESTINATION_CREATED"
+    DESTINATION_VERIFIED = "DESTINATION_VERIFIED"
+    REGISTRY_UPDATED = "REGISTRY_UPDATED"
+    AUDIT_COMMITTED = "AUDIT_COMMITTED"
+    OLD_LOCATION_REMOVED = "OLD_LOCATION_REMOVED"
+    COMPLETED = "COMPLETED"
+    RECOVERY_REQUIRED = "RECOVERY_REQUIRED"
+    ROLLED_BACK = "ROLLED_BACK"
+
+
+TERMINAL_STATES = frozenset(
+    {
+        JournalState.COMPLETED,
+        JournalState.ROLLED_BACK,
+    }
+)
+
+
+@dataclass
+class JournalEntry:
+    promotion_id: str
+    artifact_id: str
+    run_id: str
+    state: JournalState
+    old_isolation: str
+    new_isolation: str
+    old_location: str
+    new_location: str
+    content_hash: str
+    size_bytes: int
+    original_filename: str
+    actor: str
+    reason: str
+    snapshot_json: str
+    updated_at: str
+    detail: str = ""
+    retry_count: int = 0
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "promotion_id": self.promotion_id,
+            "artifact_id": self.artifact_id,
+            "run_id": self.run_id,
+            "state": self.state.value,
+            "old_isolation": self.old_isolation,
+            "new_isolation": self.new_isolation,
+            "old_location": self.old_location,
+            "new_location": self.new_location,
+            "content_hash": self.content_hash,
+            "size_bytes": self.size_bytes,
+            "original_filename": self.original_filename,
+            "actor": self.actor,
+            "reason": self.reason,
+            "snapshot_json": self.snapshot_json,
+            "updated_at": self.updated_at,
+            "detail": self.detail,
+            "retry_count": self.retry_count,
+        }
+
+
+class PromotionJournal:
+    def __init__(
+        self,
+        db_path: Path | None = None,
+        lock: threading.RLock | None = None,
+        *,
+        database: "Database | None" = None,
+    ) -> None:
+        from .sqlite_db import Database
+
+        if database is not None:
+            self.db = database
+        else:
+            if db_path is None:
+                raise ValueError("db_path or database required")
+            self.db = Database(db_path)
+        self.db_path = self.db.path
+        self._lock = lock or threading.RLock()
+        with self._lock:
+            apply_journal_schema(self.db)
+
+    def put(self, entry: JournalEntry) -> None:
+        entry.updated_at = _utc_now()
+        with self._lock:
+            with self.db.write_transaction() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO promotion_journal (
+                        promotion_id, artifact_id, run_id, state,
+                        old_isolation, new_isolation, old_location, new_location,
+                        content_hash, size_bytes, original_filename,
+                        actor, reason, snapshot_json, updated_at, detail, retry_count
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(promotion_id) DO UPDATE SET
+                        state=excluded.state,
+                        old_location=excluded.old_location,
+                        new_location=excluded.new_location,
+                        updated_at=excluded.updated_at,
+                        detail=excluded.detail,
+                        snapshot_json=excluded.snapshot_json,
+                        retry_count=excluded.retry_count
+                    """,
+                    (
+                        entry.promotion_id,
+                        entry.artifact_id,
+                        entry.run_id,
+                        entry.state.value,
+                        entry.old_isolation,
+                        entry.new_isolation,
+                        entry.old_location,
+                        entry.new_location,
+                        entry.content_hash,
+                        entry.size_bytes,
+                        entry.original_filename,
+                        entry.actor,
+                        entry.reason,
+                        entry.snapshot_json,
+                        entry.updated_at,
+                        entry.detail,
+                        entry.retry_count,
+                    ),
+                )
+
+    def get(self, promotion_id: str) -> JournalEntry | None:
+        with self._lock:
+            with self.db.connection() as conn:
+                row = conn.execute(
+                    "SELECT * FROM promotion_journal WHERE promotion_id = ?",
+                    (promotion_id,),
+                ).fetchone()
+                if not row:
+                    return None
+                return self._row(row)
+
+    def list_incomplete(self) -> list[JournalEntry]:
+        with self._lock:
+            with self.db.connection() as conn:
+                terminal = tuple(s.value for s in TERMINAL_STATES)
+                placeholders = ",".join("?" * len(terminal))
+                rows = conn.execute(
+                    f"SELECT * FROM promotion_journal WHERE state NOT IN ({placeholders}) "
+                    f"ORDER BY updated_at",
+                    terminal,
+                ).fetchall()
+                return [self._row(r) for r in rows]
+
+    def list_recovery_required(self) -> list[JournalEntry]:
+        with self._lock:
+            with self.db.connection() as conn:
+                rows = conn.execute(
+                    "SELECT * FROM promotion_journal WHERE state = ? ORDER BY updated_at",
+                    (JournalState.RECOVERY_REQUIRED.value,),
+                ).fetchall()
+                return [self._row(r) for r in rows]
+
+    def _row(self, row: Any) -> JournalEntry:
+        keys = row.keys()
+        return JournalEntry(
+            promotion_id=row["promotion_id"],
+            artifact_id=row["artifact_id"],
+            run_id=row["run_id"],
+            state=JournalState(row["state"]),
+            old_isolation=row["old_isolation"],
+            new_isolation=row["new_isolation"],
+            old_location=row["old_location"] or "",
+            new_location=row["new_location"] or "",
+            content_hash=row["content_hash"],
+            size_bytes=int(row["size_bytes"] or 0),
+            original_filename=row["original_filename"],
+            actor=row["actor"] or "",
+            reason=row["reason"] or "",
+            snapshot_json=row["snapshot_json"],
+            updated_at=row["updated_at"],
+            detail=row["detail"] or "",
+            retry_count=int(row["retry_count"] if "retry_count" in keys else 0),
+        )

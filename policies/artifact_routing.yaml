@@ -1,0 +1,21 @@
+# Default routing policy (v0.1)
+version: 1
+
+rules:
+  - condition: unknown_source_or_invalid_manifest
+    destination: quarantine
+  - condition: newly_ingested
+    destination: quarantine
+  - condition: experimental_run
+    destination: sandbox
+  - condition: validated_schema_and_checks
+    destination: validated
+  - condition: independently_verified_formal_certificate
+    destination: certified
+  - condition: failed_integrity_or_policy
+    destination: rejected
+
+notes:
+  - Promotion is always explicit via PromotionGate.
+  - Callers cannot bypass policy by requesting a destination directory.
+  - CERTIFIED requires authenticated verifier execution records, not caller-attested PASS.
