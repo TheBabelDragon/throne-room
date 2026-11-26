@@ -25,10 +25,11 @@ throne-arm-train = "agent.language.train:main"
 throne-arm-torch = "agent.language.torch_train:main"
 throne-qwuack = "qwuack.runtime:main"
 throne-eink = "duck_gate.eink.__main__:main"
+throne-artifacts = "throne_runtime.artifacts.cli:main"
 
 [build-system]
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["observer*", "visualization*", "aurora*", "agent*", "qwuack*", "duck_gate*"]
+include = ["observer*", "visualization*", "aurora*", "agent*", "qwuack*", "duck_gate*", "throne_runtime*"]
