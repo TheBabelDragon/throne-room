@@ -1,10 +1,7 @@
 """ArtifactService — primary Python interface for the runtime artifact store.
 
-Verifier keys:
-  - Production: set THRONE_VERIFIER_KEYS_PATH to a JSON key file, or pass
-    verifier_keys= / allow_ephemeral_keys=False with explicit keys.
-  - Tests: allow_ephemeral_keys=True (default in tests via fixture helpers).
-  - Missing production keys fail closed for authenticated verification.
+On startup, incomplete promotion journal entries are reconciled before the
+service accepts new promotions.
 """
 
 from __future__ import annotations
@@ -31,6 +28,7 @@ from .models import (
     Sensitivity,
     Trust,
 )
+from .paths import PathContainmentError, ensure_under, is_under, reject_symlink
 from .policy import PolicyError, load_routing_policy_loose
 from .promotion import PromotionGate
 from .registry import Registry
@@ -39,7 +37,6 @@ from .scanner import ArtifactScanner, ScanError, ScanLimits
 from .storage import LocalBlobStorage, StorageBackend
 from .verifier import ArtifactVerifier
 from .verifiers import (
-    CAPABILITY_FOR_TARGET,
     HashBoundSelfCheckVerifier,
     LeanCertificateVerifier,
     TrustedKeyRegistry,
@@ -76,6 +73,7 @@ class ArtifactService:
         verifier_keys: dict[str, bytes] | None = None,
         verifier_keys_path: Path | str | None = None,
         allow_ephemeral_keys: bool = False,
+        run_recovery: bool = True,
     ) -> None:
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
@@ -103,12 +101,10 @@ class ArtifactService:
 
         if not keys_loaded:
             if not allow_ephemeral_keys:
-                # Production fail-closed: no silent random identity
                 raise RuntimeError(
                     "verifier keys not configured; set THRONE_VERIFIER_KEYS_PATH "
                     "or pass verifier_keys= / allow_ephemeral_keys=True for tests"
                 )
-            # Explicit test-only ephemeral keys
             for vid in ("hash_bound_self_check", "lean_certificate"):
                 key_reg.register(vid, secrets.token_bytes(32), key_id="ephemeral")
 
@@ -137,6 +133,10 @@ class ArtifactService:
         self.routing_policy = None
         self._require_policy = require_policy
         self._load_policies()
+
+        self.recovery_log: list[dict[str, Any]] = []
+        if run_recovery:
+            self.recovery_log = self.promotion_gate.recover_incomplete()
 
     def _default_policy_dir(self) -> Path:
         return Path(__file__).resolve().parents[2] / "policies"
@@ -414,22 +414,24 @@ class ArtifactService:
         manifest = self.registry.get_run(run_id)
         if manifest is None:
             raise KeyError(f"unknown run_id: {run_id}")
-        dest = Path(destination).resolve()
-        if dest.exists() and dest.is_symlink():
-            raise ValueError("export destination must not be a symlink")
+        dest_raw = Path(destination)
+        if dest_raw.exists():
+            reject_symlink(dest_raw, "export destination")
+        dest = dest_raw.resolve()
         dest.mkdir(parents=True, exist_ok=True)
+        reject_symlink(dest, "export destination")
         write_manifest(dest / "manifest.json", manifest)
         art_dir = dest / "artifacts"
         art_dir.mkdir(exist_ok=True)
+        reject_symlink(art_dir, "export artifacts dir")
         art_dir_res = art_dir.resolve()
         for rec in self.registry.list_artifacts(run_id):
             src = self.storage.get_path(rec.content_hash)
             safe_name = Path(rec.original_filename).name
-            out = (art_dir / safe_name).resolve()
-            if not str(out).startswith(str(art_dir_res)):
-                raise ValueError(f"export path escape: {rec.original_filename}")
-            out.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, out)
+            out = art_dir / safe_name
+            out_res = ensure_under(art_dir_res, out, "export path")
+            out_res.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, out_res)
         promos = self.registry.list_promotions(run_id=run_id)
         (dest / "promotions.json").write_text(
             json.dumps([p.as_dict() for p in promos], indent=2, sort_keys=True) + "\n",
