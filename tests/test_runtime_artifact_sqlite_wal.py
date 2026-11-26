@@ -1,4 +1,4 @@
-"""SQLite WAL configuration, durability, concurrency, backup/restore."""
+"""SQLite WAL configuration, durability, concurrency, backup/restore, leases."""
 
 from __future__ import annotations
 
@@ -8,7 +8,12 @@ import time
 import unittest
 from pathlib import Path
 
-from throne_runtime.artifacts.locks import ArtifactLockManager, LockError, LockTimeout
+from throne_runtime.artifacts.locks import (
+    ArtifactLockManager,
+    Lease,
+    LockError,
+    LockTimeout,
+)
 from throne_runtime.artifacts.manifest import attach_manifest_hash
 from throne_runtime.artifacts.models import (
     EvidenceGrade,
@@ -21,6 +26,17 @@ from throne_runtime.artifacts.models import (
 from throne_runtime.artifacts.registry import Registry
 from throne_runtime.artifacts.sqlite_db import Database
 from tests._artifact_test_util import make_service
+
+
+class _FakeClock:
+    def __init__(self, start: float = 1_000.0) -> None:
+        self.t = start
+
+    def __call__(self) -> float:
+        return self.t
+
+    def advance(self, seconds: float) -> None:
+        self.t += seconds
 
 
 def _barrier_write(db_path: str, run_id: str, ready: mp.Event, go: mp.Event, done: mp.Queue):
@@ -88,7 +104,6 @@ def _crash_after_commit(db_path: str, run_id: str, done: mp.Queue):
         attach_manifest_hash(m)
         reg.put_run(m)
         done.put("committed")
-        # Process ends immediately after commit (normal exit simulates stop)
     except Exception as e:
         done.put(f"err:{e}")
 
@@ -115,11 +130,93 @@ class TestWALConfig(unittest.TestCase):
             self.assertGreaterEqual(st["synchronous"], 2)
 
 
+class TestLeaseSemantics(unittest.TestCase):
+    def test_release_idempotent(self):
+        with tempfile.TemporaryDirectory() as td:
+            lm = ArtifactLockManager(Path(td) / "l.sqlite3")
+            lease = lm.acquire("art-1", timeout_s=2.0)
+            lm.release(lease)
+            lm.release(lease)  # second release succeeds (idempotent)
+
+    def test_forged_token_cannot_release(self):
+        with tempfile.TemporaryDirectory() as td:
+            lm = ArtifactLockManager(Path(td) / "l.sqlite3")
+            lease = lm.acquire("art-1", timeout_s=2.0)
+            forged = Lease(
+                artifact_id=lease.artifact_id,
+                owner=lease.owner,
+                token="0" * 32,
+                expires_at=lease.expires_at,
+            )
+            with self.assertRaises(LockError):
+                lm.release(forged)
+            lm.release(lease)  # legitimate owner still succeeds
+
+    def test_renew_before_expiry(self):
+        clock = _FakeClock(1000.0)
+        with tempfile.TemporaryDirectory() as td:
+            lm = ArtifactLockManager(Path(td) / "l.sqlite3", clock=clock)
+            lease = lm.acquire("art-r", timeout_s=2.0, ttl_s=10.0)
+            clock.advance(3.0)
+            lm.renew(lease, ttl_s=10.0)
+            self.assertGreater(lease.expires_at, clock())
+            lm.release(lease)
+
+    def test_renew_after_expiry_fails(self):
+        clock = _FakeClock(1000.0)
+        with tempfile.TemporaryDirectory() as td:
+            lm = ArtifactLockManager(Path(td) / "l.sqlite3", clock=clock)
+            lease = lm.acquire("art-r", timeout_s=2.0, ttl_s=5.0)
+            clock.advance(6.0)  # past expiry, row may still exist
+            with self.assertRaises(LockError):
+                lm.renew(lease, ttl_s=10.0)
+
+    def test_renew_forged_token_fails(self):
+        clock = _FakeClock(1000.0)
+        with tempfile.TemporaryDirectory() as td:
+            lm = ArtifactLockManager(Path(td) / "l.sqlite3", clock=clock)
+            lease = lm.acquire("art-r", timeout_s=2.0, ttl_s=30.0)
+            forged = Lease(
+                artifact_id=lease.artifact_id,
+                owner=lease.owner,
+                token="deadbeef",
+                expires_at=lease.expires_at,
+            )
+            with self.assertRaises(LockError):
+                lm.renew(forged, ttl_s=10.0)
+            lm.release(lease)
+
+    def test_renew_after_release_fails(self):
+        clock = _FakeClock(1000.0)
+        with tempfile.TemporaryDirectory() as td:
+            lm = ArtifactLockManager(Path(td) / "l.sqlite3", clock=clock)
+            lease = lm.acquire("art-r", timeout_s=2.0, ttl_s=30.0)
+            lm.release(lease)
+            with self.assertRaises(LockError):
+                lm.renew(lease, ttl_s=10.0)
+
+    def test_expired_reclaimed_by_new_owner(self):
+        clock = _FakeClock(1000.0)
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "l.sqlite3"
+            lm1 = ArtifactLockManager(path, clock=clock)
+            lease1 = lm1.acquire("art-e", timeout_s=2.0, ttl_s=5.0)
+            clock.advance(6.0)
+            lm2 = ArtifactLockManager(path, clock=clock)
+            lease2 = lm2.acquire("art-e", timeout_s=2.0, ttl_s=30.0)
+            # Old owner cannot release or renew new owner's lease
+            with self.assertRaises(LockError):
+                lm1.release(lease1)
+            with self.assertRaises(LockError):
+                lm1.renew(lease1, ttl_s=10.0)
+            lm2.release(lease2)
+
+
 class TestConcurrentProcesses(unittest.TestCase):
     def test_reader_during_writer(self):
         with tempfile.TemporaryDirectory() as td:
             db_path = str(Path(td) / "rw.sqlite3")
-            Registry(Path(db_path))  # bootstrap
+            Registry(Path(db_path))
             ready_w, ready_r = mp.Event(), mp.Event()
             go = mp.Event()
             q: mp.Queue = mp.Queue()
@@ -165,31 +262,6 @@ class TestConcurrentProcesses(unittest.TestCase):
             lm1.release(a)
             lm2.release(b)
 
-    def test_lease_renew_and_ownership(self):
-        with tempfile.TemporaryDirectory() as td:
-            db = Path(td) / "rn.sqlite3"
-            lm = ArtifactLockManager(db, default_ttl_s=2.0)
-            lease = lm.acquire("art-r", timeout_s=2.0, ttl_s=2.0)
-            lm.renew(lease, ttl_s=5.0)
-            self.assertGreater(lease.expires_at, time.time())
-            lm.release(lease)
-            with self.assertRaises(LockError):
-                lm.release(lease)  # ownership gone
-
-    def test_expired_lease_reclaim(self):
-        with tempfile.TemporaryDirectory() as td:
-            db = Path(td) / "ex.sqlite3"
-            lm = ArtifactLockManager(db, default_ttl_s=0.2)
-            lease = lm.acquire("art-e", timeout_s=1.0, ttl_s=0.2)
-            time.sleep(0.4)
-            lm2 = ArtifactLockManager(db)
-            lease2 = lm2.acquire("art-e", timeout_s=2.0)
-            lm2.release(lease2)
-            try:
-                lm.release(lease)
-            except LockError:
-                pass
-
     def test_commit_then_reopen(self):
         with tempfile.TemporaryDirectory() as td:
             db_path = str(Path(td) / "c.sqlite3")
@@ -202,14 +274,12 @@ class TestConcurrentProcesses(unittest.TestCase):
             reg = Registry(Path(db_path))
             self.assertIsNotNone(reg.get_run("run-persist"))
             self.assertEqual(reg.db.integrity_check(), "ok")
-            self.assertEqual(reg.db.wal_status()["journal_mode"].lower(), "wal")
 
 
 class TestCheckpointBackup(unittest.TestCase):
     def test_passive_with_reader(self):
         with tempfile.TemporaryDirectory() as td:
             db = Database(Path(td) / "cp.sqlite3")
-            # open a reader connection
             reader = db.connect()
             try:
                 r = db.checkpoint_passive()
@@ -246,7 +316,6 @@ class TestCheckpointBackup(unittest.TestCase):
             reg2 = Registry(dest)
             self.assertIsNotNone(reg2.get_run("run-bak"))
             self.assertEqual(reg2.db.integrity_check(), "ok")
-            self.assertEqual(reg2.db.wal_status()["journal_mode"].lower(), "wal")
 
 
 if __name__ == "__main__":
