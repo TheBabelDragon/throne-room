@@ -7,16 +7,14 @@ import threading
 import unittest
 from pathlib import Path
 
-from throne_runtime.artifacts.service import ArtifactService
-
-_POLICY = Path(__file__).resolve().parents[1] / "policies"
+from tests._artifact_test_util import make_service
 
 
 class TestIntegration(unittest.TestCase):
     def test_concurrent_ingest(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            svc = ArtifactService(root=root, policy_dir=_POLICY)
+            svc = make_service(root)
             run = svc.create_run(project="P", subsystem="s", run_type="t")
             errors: list[BaseException] = []
 
