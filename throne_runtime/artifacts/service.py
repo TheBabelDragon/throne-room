@@ -1,8 +1,16 @@
-"""ArtifactService — primary Python interface for the runtime artifact store."""
+"""ArtifactService — primary Python interface for the runtime artifact store.
+
+Verifier keys:
+  - Production: set THRONE_VERIFIER_KEYS_PATH to a JSON key file, or pass
+    verifier_keys= / allow_ephemeral_keys=False with explicit keys.
+  - Tests: allow_ephemeral_keys=True (default in tests via fixture helpers).
+  - Missing production keys fail closed for authenticated verification.
+"""
 
 from __future__ import annotations
 
 import json
+import os
 import secrets
 import shutil
 import uuid
@@ -31,11 +39,14 @@ from .scanner import ArtifactScanner, ScanError, ScanLimits
 from .storage import LocalBlobStorage, StorageBackend
 from .verifier import ArtifactVerifier
 from .verifiers import (
+    CAPABILITY_FOR_TARGET,
     HashBoundSelfCheckVerifier,
     LeanCertificateVerifier,
     TrustedKeyRegistry,
     VerificationRequest,
+    VerifierCapability,
     VerifierRegistry,
+    load_keys_from_file,
 )
 
 
@@ -63,6 +74,8 @@ class ArtifactService:
         *,
         require_policy: bool = True,
         verifier_keys: dict[str, bytes] | None = None,
+        verifier_keys_path: Path | str | None = None,
+        allow_ephemeral_keys: bool = False,
     ) -> None:
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
@@ -73,24 +86,44 @@ class ArtifactService:
         self.router = ArtifactRouter()
 
         key_reg = TrustedKeyRegistry()
-        # Service-held keys (not from caller metadata)
-        default_keys = {
-            "hash_bound_self_check": secrets.token_bytes(32),
-            "lean_certificate": secrets.token_bytes(32),
-        }
+        keys_loaded = False
+
+        path_env = verifier_keys_path or os.environ.get("THRONE_VERIFIER_KEYS_PATH")
+        if path_env:
+            loaded = load_keys_from_file(Path(path_env))
+            for vid, entries in loaded.items():
+                for kid, key, retired in entries:
+                    key_reg.register(vid, key, key_id=kid, retired=retired)
+            keys_loaded = True
+
         if verifier_keys:
-            default_keys.update(verifier_keys)
-        for vid, key in default_keys.items():
-            key_reg.register(vid, key)
+            for vid, key in verifier_keys.items():
+                key_reg.register(vid, key, key_id="injected")
+            keys_loaded = True
+
+        if not keys_loaded:
+            if not allow_ephemeral_keys:
+                # Production fail-closed: no silent random identity
+                raise RuntimeError(
+                    "verifier keys not configured; set THRONE_VERIFIER_KEYS_PATH "
+                    "or pass verifier_keys= / allow_ephemeral_keys=True for tests"
+                )
+            # Explicit test-only ephemeral keys
+            for vid in ("hash_bound_self_check", "lean_certificate"):
+                key_reg.register(vid, secrets.token_bytes(32), key_id="ephemeral")
 
         self.verifiers = VerifierRegistry(key_registry=key_reg)
+        hk = key_reg.active_key("hash_bound_self_check")
+        lk = key_reg.active_key("lean_certificate")
         self.verifiers.register(
             HashBoundSelfCheckVerifier(blob_resolver=self.storage.get_path),
-            key=default_keys["hash_bound_self_check"],
+            key=hk.key if hk else None,
+            key_id=hk.key_id if hk else "default",
         )
         self.verifiers.register(
             LeanCertificateVerifier(),
-            key=default_keys["lean_certificate"],
+            key=lk.key if lk else None,
+            key_id=lk.key_id if lk else "default",
         )
         self.promotion_gate = PromotionGate(
             self.registry,
@@ -310,29 +343,6 @@ class ArtifactService:
     def list_artifacts(self, run_id: str) -> list[ArtifactRecord]:
         return self.registry.list_artifacts(run_id)
 
-    def run_verifier(
-        self,
-        *,
-        artifact_id: str,
-        verifier_id: str,
-        proof_target: str = "",
-        source_commit: str = "",
-        certificate_path: Path | None = None,
-    ) -> dict[str, Any]:
-        art = self.registry.get_artifact(artifact_id)
-        if art is None:
-            raise KeyError(f"unknown artifact_id: {artifact_id}")
-        run = self.registry.get_run(art.run_id)
-        req = VerificationRequest(
-            artifact_id=art.artifact_id,
-            content_hash=art.content_hash,
-            source_commit=source_commit or (run.source_commit if run else ""),
-            proof_target=proof_target,
-            certificate_path=certificate_path,
-        )
-        record = self.verifiers.execute(verifier_id, req)
-        return record.as_dict()
-
     def promote(
         self,
         artifact_id: str,
@@ -356,37 +366,47 @@ class ArtifactService:
                 f"expected one of {[i.value for i in Isolation]}"
             ) from e
 
-        execution_record = None
         run = self.registry.get_run(rec.run_id)
         sc = source_commit or (run.source_commit if run else "")
+        pt = proof_target
 
+        required_cap = None
+        if target_iso == Isolation.VALIDATED:
+            required_cap = VerifierCapability.INTEGRITY_CHECK
+            if not pt:
+                pt = "integrity"
+        elif target_iso == Isolation.CERTIFIED_READ_ONLY:
+            required_cap = VerifierCapability.FORMAL_CERTIFICATE_VERIFICATION
+
+        execution_record = None
         if verifier_id:
             req = VerificationRequest(
                 artifact_id=rec.artifact_id,
                 content_hash=rec.content_hash,
                 source_commit=sc,
-                proof_target=proof_target,
+                proof_target=pt,
+                required_capability=required_cap,
             )
             execution_record = self.verifiers.execute(verifier_id, req)
-
-        if target_iso == Isolation.VALIDATED and execution_record is None:
+        elif target_iso == Isolation.VALIDATED:
             req = VerificationRequest(
                 artifact_id=rec.artifact_id,
                 content_hash=rec.content_hash,
                 source_commit=sc,
-                proof_target=proof_target or "integrity",
+                proof_target=pt or "integrity",
+                required_capability=VerifierCapability.INTEGRITY_CHECK,
             )
             execution_record = self.verifiers.execute("hash_bound_self_check", req)
 
-        # Caller-supplied verifier_evidence dict is never treated as authentication
         promo = self.promotion_gate.promote(
             rec,
             target_isolation=target_iso,
             actor=actor,
             reason=reason or f"promote to {target_iso.value}",
-            verifier_evidence=None,  # ignore caller-attested PASS dicts
+            verifier_evidence=None,
             execution_record=execution_record,
             source_commit=sc,
+            proof_target=pt,
         )
         return promo.as_dict()
 
@@ -395,16 +415,18 @@ class ArtifactService:
         if manifest is None:
             raise KeyError(f"unknown run_id: {run_id}")
         dest = Path(destination).resolve()
+        if dest.exists() and dest.is_symlink():
+            raise ValueError("export destination must not be a symlink")
         dest.mkdir(parents=True, exist_ok=True)
         write_manifest(dest / "manifest.json", manifest)
         art_dir = dest / "artifacts"
         art_dir.mkdir(exist_ok=True)
+        art_dir_res = art_dir.resolve()
         for rec in self.registry.list_artifacts(run_id):
             src = self.storage.get_path(rec.content_hash)
-            # Safe relative path under export dest
             safe_name = Path(rec.original_filename).name
             out = (art_dir / safe_name).resolve()
-            if not str(out).startswith(str(art_dir.resolve())):
+            if not str(out).startswith(str(art_dir_res)):
                 raise ValueError(f"export path escape: {rec.original_filename}")
             out.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, out)
