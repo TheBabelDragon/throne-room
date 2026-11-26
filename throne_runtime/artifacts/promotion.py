@@ -1,4 +1,4 @@
-"""PromotionGate with durable journal and restart-recoverable transitions."""
+"""PromotionGate with durable journal, process locks, exact audit reconcile."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from typing import Any
 
 from .hashing import sha256_file
 from .journal import JournalEntry, JournalState, PromotionJournal
+from .locks import ArtifactLockManager, LockTimeout
 from .models import (
     ArtifactRecord,
     EvidenceGrade,
@@ -20,6 +21,7 @@ from .models import (
     Trust,
 )
 from .registry import Registry
+from .registry_ext import ensure_audit_record
 from .router import ArtifactRouter
 from .verifiers import (
     VerificationExecutionRecord,
@@ -67,6 +69,8 @@ class PromotionGate:
         storage: Any = None,
         verifier_registry: VerifierRegistry | None = None,
         journal: PromotionJournal | None = None,
+        lock_manager: ArtifactLockManager | None = None,
+        lock_timeout_s: float = 30.0,
     ) -> None:
         self.registry = registry
         self.router = router or ArtifactRouter()
@@ -74,16 +78,20 @@ class PromotionGate:
         self.storage = storage
         self.verifiers = verifier_registry or VerifierRegistry()
         self.journal = journal or PromotionJournal(
-            registry.db_path, lock=registry._lock  # share lock domain
+            registry.db_path, lock=registry._lock
         )
-        self._locks: dict[str, threading.Lock] = {}
-        self._locks_guard = threading.Lock()
+        self.locks = lock_manager or ArtifactLockManager(
+            registry.db_path, lock=registry._lock
+        )
+        self.lock_timeout_s = lock_timeout_s
+        self._thread_locks: dict[str, threading.Lock] = {}
+        self._thread_guard = threading.Lock()
 
-    def _artifact_lock(self, artifact_id: str) -> threading.Lock:
-        with self._locks_guard:
-            if artifact_id not in self._locks:
-                self._locks[artifact_id] = threading.Lock()
-            return self._locks[artifact_id]
+    def _thread_lock(self, artifact_id: str) -> threading.Lock:
+        with self._thread_guard:
+            if artifact_id not in self._thread_locks:
+                self._thread_locks[artifact_id] = threading.Lock()
+            return self._thread_locks[artifact_id]
 
     def _snapshot(self, artifact: ArtifactRecord) -> dict[str, Any]:
         return {
@@ -108,174 +116,232 @@ class PromotionGate:
         artifact.verification_history = deepcopy(snap["verification_history"])
 
     def recover_incomplete(self) -> list[dict[str, Any]]:
-        """Reconcile incomplete journal entries. Idempotent."""
         results: list[dict[str, Any]] = []
         for entry in self.journal.list_incomplete():
             results.append(self._recover_one(entry))
         return results
 
+    def retry_recovery(self, promotion_id: str) -> dict[str, Any]:
+        """Operator-directed recovery retry for a specific journal entry."""
+        entry = self.journal.get(promotion_id)
+        if entry is None:
+            return {"promotion_id": promotion_id, "action": "missing"}
+        return self._recover_one(entry)
+
     def _recover_one(self, entry: JournalEntry) -> dict[str, Any]:
-        lock = self._artifact_lock(entry.artifact_id)
-        with lock:
-            # Re-read current state
-            current = self.journal.get(entry.promotion_id)
-            if current is None or current.state in (
-                JournalState.COMPLETED,
-                JournalState.ROLLED_BACK,
-                JournalState.RECOVERY_REQUIRED,
-            ):
-                return {"promotion_id": entry.promotion_id, "action": "already_terminal"}
-
-            art = self.registry.get_artifact(entry.artifact_id)
-            snap = json.loads(entry.snapshot_json)
-
+        tlock = self._thread_lock(entry.artifact_id)
+        with tlock:
             try:
-                if current.state == JournalState.PREPARED:
-                    # Nothing FS-changed yet; mark rolled back
-                    current.state = JournalState.ROLLED_BACK
-                    current.detail = "recovered: prepared only"
+                lease = self.locks.acquire(
+                    entry.artifact_id, timeout_s=self.lock_timeout_s
+                )
+            except LockTimeout as e:
+                return {
+                    "promotion_id": entry.promotion_id,
+                    "action": "lock_timeout",
+                    "detail": str(e),
+                }
+            try:
+                return self._recover_one_locked(entry)
+            finally:
+                self.locks.release(lease)
+
+    def _recover_one_locked(self, entry: JournalEntry) -> dict[str, Any]:
+        current = self.journal.get(entry.promotion_id)
+        if current is None:
+            return {"promotion_id": entry.promotion_id, "action": "missing"}
+        # COMPLETED / ROLLED_BACK are terminal; RECOVERY_REQUIRED is retryable
+        if current.state in (JournalState.COMPLETED, JournalState.ROLLED_BACK):
+            return {"promotion_id": entry.promotion_id, "action": "already_terminal"}
+
+        if current.state == JournalState.RECOVERY_REQUIRED:
+            current.retry_count = int(current.retry_count or 0) + 1
+            # Re-enter pipeline based on durable evidence, not the label alone
+            # Prefer forward if dest+registry look good; else keep RECOVERY_REQUIRED
+
+        art = self.registry.get_artifact(entry.artifact_id)
+        snap = json.loads(entry.snapshot_json)
+
+        try:
+            if current.state == JournalState.PREPARED:
+                current.state = JournalState.ROLLED_BACK
+                current.detail = "recovered: prepared only"
+                self.journal.put(current)
+                return {"promotion_id": entry.promotion_id, "action": "rolled_back_prepared"}
+
+            dest_ok = False
+            if current.new_location:
+                dest = Path(current.new_location)
+                if dest.is_file() and not dest.is_symlink():
+                    if sha256_file(dest) == current.content_hash:
+                        if (
+                            not current.size_bytes
+                            or dest.stat().st_size == current.size_bytes
+                        ):
+                            dest_ok = True
+
+            # From RECOVERY_REQUIRED: decide branch by verified state
+            if current.state == JournalState.RECOVERY_REQUIRED:
+                if dest_ok and art and art.stored_location == current.new_location:
+                    current.state = JournalState.REGISTRY_UPDATED
                     self.journal.put(current)
-                    return {"promotion_id": entry.promotion_id, "action": "rolled_back_prepared"}
+                elif dest_ok:
+                    current.state = JournalState.DESTINATION_VERIFIED
+                    self.journal.put(current)
+                else:
+                    current.detail = (
+                        f"retry {current.retry_count}: dest not verified; "
+                        f"manual intervention may be required"
+                    )
+                    self.journal.put(current)
+                    return {
+                        "promotion_id": entry.promotion_id,
+                        "action": "recovery_required",
+                        "detail": current.detail,
+                    }
 
-                # Validate destination if claimed
-                dest_ok = False
-                if current.new_location:
-                    dest = Path(current.new_location)
-                    if dest.is_file() and not dest.is_symlink():
-                        if sha256_file(dest) == current.content_hash:
-                            if (
-                                not current.size_bytes
-                                or dest.stat().st_size == current.size_bytes
-                            ):
-                                dest_ok = True
+            current = self.journal.get(entry.promotion_id) or current
 
-                if current.state in (
-                    JournalState.DESTINATION_CREATED,
-                    JournalState.DESTINATION_VERIFIED,
-                ):
-                    if not dest_ok:
-                        # Remove bad dest if present; restore original metadata
-                        if current.new_location:
-                            p = Path(current.new_location)
-                            if p.exists() and p.resolve() != Path(current.old_location).resolve():
-                                try:
-                                    p.unlink()
-                                except OSError:
-                                    pass
-                        if art:
-                            self._restore_from_snapshot(art, snap)
-                            self.registry.put_artifact(art)
-                        current.state = JournalState.ROLLED_BACK
-                        current.detail = "recovered: dest missing/corrupt"
+            if current.state in (
+                JournalState.DESTINATION_CREATED,
+                JournalState.DESTINATION_VERIFIED,
+            ):
+                if not dest_ok:
+                    if current.new_location:
+                        p = Path(current.new_location)
+                        if p.exists() and p.resolve() != Path(current.old_location).resolve():
+                            try:
+                                p.unlink()
+                            except OSError:
+                                pass
+                    if art:
+                        self._restore_from_snapshot(art, snap)
+                        self.registry.put_artifact(art)
+                    current.state = JournalState.ROLLED_BACK
+                    current.detail = "recovered: dest missing/corrupt"
+                    self.journal.put(current)
+                    return {
+                        "promotion_id": entry.promotion_id,
+                        "action": "rolled_back_bad_dest",
+                    }
+                if art:
+                    art.isolation = Isolation(current.new_isolation)
+                    art.stored_location = current.new_location
+                    self.registry.put_artifact(art)
+                current.state = JournalState.REGISTRY_UPDATED
+                self.journal.put(current)
+
+            current = self.journal.get(entry.promotion_id) or current
+
+            if current.state == JournalState.REGISTRY_UPDATED:
+                promo = PromotionRecord(
+                    promotion_id=current.promotion_id,
+                    artifact_id=current.artifact_id,
+                    run_id=current.run_id,
+                    previous_isolation=Isolation(current.old_isolation),
+                    new_isolation=Isolation(current.new_isolation),
+                    previous_evidence=EvidenceGrade(snap["evidence_grade"]),
+                    new_evidence=EvidenceGrade(
+                        art.evidence_grade.value if art else snap["evidence_grade"]
+                    ),
+                    previous_trust=Trust(snap["trust"]),
+                    new_trust=Trust(art.trust.value if art else snap["trust"]),
+                    policy_rule="recovery",
+                    actor=current.actor,
+                    reason=current.reason or "recovery",
+                    decision="ALLOWED",
+                    timestamp=_utc_now(),
+                )
+                try:
+                    status = ensure_audit_record(self.registry, promo)
+                except ValueError as e:
+                    current.state = JournalState.RECOVERY_REQUIRED
+                    current.detail = f"audit conflict: {e}"
+                    self.journal.put(current)
+                    return {
+                        "promotion_id": entry.promotion_id,
+                        "action": "recovery_required",
+                        "detail": current.detail,
+                    }
+                except Exception as e:
+                    # Real DB failure — do not advance
+                    current.state = JournalState.RECOVERY_REQUIRED
+                    current.detail = f"audit write failed: {e}"
+                    self.journal.put(current)
+                    return {
+                        "promotion_id": entry.promotion_id,
+                        "action": "recovery_required",
+                        "detail": current.detail,
+                    }
+                current.state = JournalState.AUDIT_COMMITTED
+                current.detail = f"audit {status}"
+                self.journal.put(current)
+
+            current = self.journal.get(entry.promotion_id) or current
+
+            if current.state == JournalState.AUDIT_COMMITTED:
+                if current.old_location and current.new_location:
+                    old_p = Path(current.old_location)
+                    new_p = Path(current.new_location)
+                    if old_p.exists() and old_p.resolve() != new_p.resolve():
+                        try:
+                            old_p.unlink()
+                        except OSError as e:
+                            current.state = JournalState.RECOVERY_REQUIRED
+                            current.detail = f"old-tier removal failed: {e}"
+                            self.journal.put(current)
+                            return {
+                                "promotion_id": entry.promotion_id,
+                                "action": "recovery_required",
+                                "detail": current.detail,
+                            }
+                current.state = JournalState.OLD_LOCATION_REMOVED
+                self.journal.put(current)
+
+            current = self.journal.get(entry.promotion_id) or current
+
+            if current.state == JournalState.OLD_LOCATION_REMOVED:
+                if current.old_location and current.new_location:
+                    old_p = Path(current.old_location)
+                    new_p = Path(current.new_location)
+                    if old_p.exists() and old_p.resolve() != new_p.resolve():
+                        current.state = JournalState.RECOVERY_REQUIRED
+                        current.detail = "old-tier still exposed after removal"
                         self.journal.put(current)
                         return {
                             "promotion_id": entry.promotion_id,
-                            "action": "rolled_back_bad_dest",
+                            "action": "recovery_required",
+                            "detail": current.detail,
                         }
-                    # Dest ok but registry not updated — complete forward if possible
-                    if art:
-                        art.isolation = Isolation(current.new_isolation)
-                        art.stored_location = current.new_location
-                        self.registry.put_artifact(art)
-                        current.state = JournalState.REGISTRY_UPDATED
+                    if not new_p.is_file() or sha256_file(new_p) != current.content_hash:
+                        current.state = JournalState.RECOVERY_REQUIRED
+                        current.detail = "new destination missing or corrupt"
                         self.journal.put(current)
-
-                # Refresh
-                current = self.journal.get(entry.promotion_id) or current
-
-                if current.state == JournalState.REGISTRY_UPDATED:
-                    # Ensure audit exists (idempotent by promotion_id PK)
-                    promo = PromotionRecord(
-                        promotion_id=current.promotion_id,
-                        artifact_id=current.artifact_id,
-                        run_id=current.run_id,
-                        previous_isolation=Isolation(current.old_isolation),
-                        new_isolation=Isolation(current.new_isolation),
-                        previous_evidence=EvidenceGrade(snap["evidence_grade"]),
-                        new_evidence=EvidenceGrade(
-                            art.evidence_grade.value if art else snap["evidence_grade"]
-                        ),
-                        previous_trust=Trust(snap["trust"]),
-                        new_trust=Trust(art.trust.value if art else snap["trust"]),
-                        policy_rule="recovery",
-                        actor=current.actor,
-                        reason=current.reason or "recovery",
-                        decision="ALLOWED",
-                        timestamp=_utc_now(),
-                    )
-                    try:
-                        self.registry.append_promotion(promo)
-                    except Exception:
-                        # May already exist
-                        pass
-                    current.state = JournalState.AUDIT_COMMITTED
-                    self.journal.put(current)
-
-                current = self.journal.get(entry.promotion_id) or current
-
-                if current.state == JournalState.AUDIT_COMMITTED:
-                    # Remove old location if distinct
-                    if current.old_location and current.new_location:
-                        old_p = Path(current.old_location)
-                        new_p = Path(current.new_location)
-                        if old_p.exists() and old_p.resolve() != new_p.resolve():
-                            try:
-                                old_p.unlink()
-                            except OSError as e:
-                                current.state = JournalState.RECOVERY_REQUIRED
-                                current.detail = f"old-tier removal failed: {e}"
-                                self.journal.put(current)
-                                return {
-                                    "promotion_id": entry.promotion_id,
-                                    "action": "recovery_required",
-                                    "detail": current.detail,
-                                }
-                    current.state = JournalState.OLD_LOCATION_REMOVED
-                    self.journal.put(current)
-
-                current = self.journal.get(entry.promotion_id) or current
-
-                if current.state == JournalState.OLD_LOCATION_REMOVED:
-                    # Final invariant checks
-                    if current.old_location and current.new_location:
-                        old_p = Path(current.old_location)
-                        new_p = Path(current.new_location)
-                        if old_p.exists() and old_p.resolve() != new_p.resolve():
-                            current.state = JournalState.RECOVERY_REQUIRED
-                            current.detail = "old-tier still exposed after removal"
-                            self.journal.put(current)
-                            return {
-                                "promotion_id": entry.promotion_id,
-                                "action": "recovery_required",
-                                "detail": current.detail,
-                            }
-                        if not new_p.is_file() or sha256_file(new_p) != current.content_hash:
-                            current.state = JournalState.RECOVERY_REQUIRED
-                            current.detail = "new destination missing or corrupt"
-                            self.journal.put(current)
-                            return {
-                                "promotion_id": entry.promotion_id,
-                                "action": "recovery_required",
-                                "detail": current.detail,
-                            }
-                    current.state = JournalState.COMPLETED
-                    current.detail = "recovered to completed"
-                    self.journal.put(current)
-                    return {"promotion_id": entry.promotion_id, "action": "completed"}
-
-                return {
-                    "promotion_id": entry.promotion_id,
-                    "action": f"state_{current.state.value}",
-                }
-            except Exception as e:
-                current.state = JournalState.RECOVERY_REQUIRED
-                current.detail = f"recovery exception: {e}"
+                        return {
+                            "promotion_id": entry.promotion_id,
+                            "action": "recovery_required",
+                            "detail": current.detail,
+                        }
+                current.state = JournalState.COMPLETED
+                current.detail = "recovered to completed"
                 self.journal.put(current)
-                return {
-                    "promotion_id": entry.promotion_id,
-                    "action": "recovery_required",
-                    "detail": str(e),
-                }
+                return {"promotion_id": entry.promotion_id, "action": "completed"}
+
+            return {
+                "promotion_id": entry.promotion_id,
+                "action": f"state_{current.state.value}",
+            }
+        except Exception as e:
+            current = self.journal.get(entry.promotion_id) or current
+            current.state = JournalState.RECOVERY_REQUIRED
+            current.detail = f"recovery exception: {e}"
+            current.retry_count = int(current.retry_count or 0) + 1
+            self.journal.put(current)
+            return {
+                "promotion_id": entry.promotion_id,
+                "action": "recovery_required",
+                "detail": str(e),
+            }
 
     def promote(
         self,
@@ -294,23 +360,29 @@ class PromotionGate:
         proof_target: str = "",
         _fail_at: str | None = None,
     ) -> PromotionRecord:
-        lock = self._artifact_lock(artifact.artifact_id)
-        with lock:
-            return self._promote_locked(
-                artifact,
-                target_isolation=target_isolation,
-                target_evidence=target_evidence,
-                target_trust=target_trust,
-                actor=actor,
-                reason=reason,
-                policy_rule=policy_rule,
-                verifier_evidence=verifier_evidence,
-                source_hashes=source_hashes,
-                execution_record=execution_record,
-                source_commit=source_commit,
-                proof_target=proof_target,
-                _fail_at=_fail_at,
+        tlock = self._thread_lock(artifact.artifact_id)
+        with tlock:
+            lease = self.locks.acquire(
+                artifact.artifact_id, timeout_s=self.lock_timeout_s
             )
+            try:
+                return self._promote_locked(
+                    artifact,
+                    target_isolation=target_isolation,
+                    target_evidence=target_evidence,
+                    target_trust=target_trust,
+                    actor=actor,
+                    reason=reason,
+                    policy_rule=policy_rule,
+                    verifier_evidence=verifier_evidence,
+                    source_hashes=source_hashes,
+                    execution_record=execution_record,
+                    source_commit=source_commit,
+                    proof_target=proof_target,
+                    _fail_at=_fail_at,
+                )
+            finally:
+                self.locks.release(lease)
 
     def _promote_locked(
         self,
@@ -513,11 +585,10 @@ class PromotionGate:
 
             if _fail_at == "audit_append":
                 raise PromotionError("injected: audit_append")
-            self.registry.append_promotion(rec)
+            ensure_audit_record(self.registry, rec)
             journal.state = JournalState.AUDIT_COMMITTED
             self.journal.put(journal)
 
-            # Old-tier removal only after durable audit
             if old_isolation != target_isolation and old_location:
                 old_path = Path(old_location)
                 if old_path.exists() and old_path.is_file():
@@ -548,14 +619,12 @@ class PromotionGate:
             return rec
 
         except Exception as e:
-            # Best-effort rollback if we have not committed audit
             j = self.journal.get(promotion_id)
             if j and j.state in (
                 JournalState.AUDIT_COMMITTED,
                 JournalState.OLD_LOCATION_REMOVED,
                 JournalState.COMPLETED,
             ):
-                # Forward recovery on next startup
                 if j.state != JournalState.COMPLETED:
                     j.state = JournalState.RECOVERY_REQUIRED
                     j.detail = str(e)
@@ -579,7 +648,6 @@ class PromotionGate:
                     source_hashes=source_hashes,
                 )
 
-            # Rollback dest
             if placed_path is not None and str(placed_path) != old_location:
                 try:
                     if placed_path.exists() and placed_path.resolve() != Path(
@@ -616,7 +684,6 @@ class PromotionGate:
                     source_hashes=source_hashes,
                 )
 
-            # Re-place original if missing
             if old_location and not Path(old_location).exists() and self.storage:
                 try:
                     blob = self.storage.get_path(artifact.content_hash)
@@ -656,7 +723,7 @@ class PromotionGate:
                 source_hashes=source_hashes,
             )
             try:
-                self.registry.append_promotion(fail)
+                ensure_audit_record(self.registry, fail)
             except Exception:
                 pass
             return fail
