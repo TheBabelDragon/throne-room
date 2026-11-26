@@ -8,6 +8,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from .manifest import compute_manifest_hash
 from .models import (
     ArtifactRecord,
     EvidenceGrade,
@@ -17,29 +18,31 @@ from .models import (
     Sensitivity,
     Trust,
 )
-from .manifest import compute_manifest_hash
+from .sqlite_db import Database, SQLiteSettings
 
 
 class Registry:
-    """Process-safe (threaded) SQLite registry."""
+    """Process-safe registry backed by a shared WAL Database."""
 
-    def __init__(self, db_path: Path) -> None:
+    def __init__(
+        self,
+        db_path: Path,
+        *,
+        database: Database | None = None,
+        settings: SQLiteSettings | None = None,
+    ) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self.db = database or Database(self.db_path, settings=settings)
         self._init_schema()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.db_path), timeout=30)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA foreign_keys=ON")
-        return conn
+        return self.db.connect()
 
     def _init_schema(self) -> None:
         with self._lock:
-            conn = self._connect()
-            try:
+            with self.db.write_transaction() as conn:
                 conn.executescript(
                     """
                     CREATE TABLE IF NOT EXISTS runs (
@@ -115,17 +118,14 @@ class Registry:
                     CREATE INDEX IF NOT EXISTS idx_ver_records_artifact
                         ON verification_records(artifact_id);
                     CREATE UNIQUE INDEX IF NOT EXISTS idx_ver_records_nonce
-                        ON verification_records(nonce) WHERE nonce IS NOT NULL AND nonce != '';
+                        ON verification_records(nonce)
+                        WHERE nonce IS NOT NULL AND nonce != '';
                     """
                 )
-                conn.commit()
-            finally:
-                conn.close()
 
     def put_run(self, manifest: RunManifest) -> None:
         with self._lock:
-            conn = self._connect()
-            try:
+            with self.db.write_transaction() as conn:
                 conn.execute(
                     """
                     INSERT INTO runs (
@@ -165,14 +165,10 @@ class Registry:
                         manifest.manifest_hash,
                     ),
                 )
-                conn.commit()
-            finally:
-                conn.close()
 
     def get_run(self, run_id: str) -> RunManifest | None:
         with self._lock:
-            conn = self._connect()
-            try:
+            with self.db.connection() as conn:
                 row = conn.execute(
                     "SELECT manifest_json, manifest_hash FROM runs WHERE run_id = ?",
                     (run_id,),
@@ -188,13 +184,10 @@ class Registry:
                         f"corrupted manifest for {run_id}: stored hash mismatch"
                     )
                 return m
-            finally:
-                conn.close()
 
     def list_runs(self, project: str | None = None) -> list[RunManifest]:
         with self._lock:
-            conn = self._connect()
-            try:
+            with self.db.connection() as conn:
                 if project:
                     rows = conn.execute(
                         "SELECT manifest_json FROM runs WHERE project = ? ORDER BY created_at",
@@ -205,13 +198,10 @@ class Registry:
                         "SELECT manifest_json FROM runs ORDER BY created_at"
                     ).fetchall()
                 return [RunManifest.from_dict(json.loads(r["manifest_json"])) for r in rows]
-            finally:
-                conn.close()
 
     def put_artifact(self, rec: ArtifactRecord) -> None:
         with self._lock:
-            conn = self._connect()
-            try:
+            with self.db.write_transaction() as conn:
                 conn.execute(
                     """
                     INSERT INTO artifacts (
@@ -254,34 +244,25 @@ class Registry:
                         json.dumps(rec.verification_history),
                     ),
                 )
-                conn.commit()
-            finally:
-                conn.close()
 
     def get_artifact(self, artifact_id: str) -> ArtifactRecord | None:
         with self._lock:
-            conn = self._connect()
-            try:
+            with self.db.connection() as conn:
                 row = conn.execute(
                     "SELECT * FROM artifacts WHERE artifact_id = ?", (artifact_id,)
                 ).fetchone()
                 if not row:
                     return None
                 return self._row_to_artifact(row)
-            finally:
-                conn.close()
 
     def list_artifacts(self, run_id: str) -> list[ArtifactRecord]:
         with self._lock:
-            conn = self._connect()
-            try:
+            with self.db.connection() as conn:
                 rows = conn.execute(
                     "SELECT * FROM artifacts WHERE run_id = ? ORDER BY created_at",
                     (run_id,),
                 ).fetchall()
                 return [self._row_to_artifact(r) for r in rows]
-            finally:
-                conn.close()
 
     def _row_to_artifact(self, row: sqlite3.Row) -> ArtifactRecord:
         return ArtifactRecord(
@@ -304,8 +285,7 @@ class Registry:
 
     def append_promotion(self, rec: PromotionRecord) -> None:
         with self._lock:
-            conn = self._connect()
-            try:
+            with self.db.write_transaction() as conn:
                 conn.execute(
                     """
                     INSERT INTO promotions (
@@ -336,16 +316,12 @@ class Registry:
                         json.dumps(rec.source_hashes),
                     ),
                 )
-                conn.commit()
-            finally:
-                conn.close()
 
     def list_promotions(
         self, artifact_id: str | None = None, run_id: str | None = None
     ) -> list[PromotionRecord]:
         with self._lock:
-            conn = self._connect()
-            try:
+            with self.db.connection() as conn:
                 if artifact_id:
                     rows = conn.execute(
                         "SELECT * FROM promotions WHERE artifact_id = ? ORDER BY timestamp",
@@ -383,8 +359,6 @@ class Registry:
                         )
                     )
                 return out
-            finally:
-                conn.close()
 
     def persist_verification_record(self, record_dict: dict[str, Any]) -> None:
         record_hash = record_dict.get("record_hash") or ""
@@ -394,8 +368,7 @@ class Registry:
         if not record_dict.get("signature"):
             raise ValueError("verification record missing signature")
         with self._lock:
-            conn = self._connect()
-            try:
+            with self.db.write_transaction() as conn:
                 existing = conn.execute(
                     "SELECT record_id FROM verification_records WHERE record_hash = ?",
                     (record_hash,),
@@ -426,30 +399,22 @@ class Registry:
                         record_dict.get("executed_at", ""),
                     ),
                 )
-                conn.commit()
-            finally:
-                conn.close()
 
     def seen_verification_hashes(self, artifact_id: str) -> set[str]:
         with self._lock:
-            conn = self._connect()
-            try:
+            with self.db.connection() as conn:
                 rows = conn.execute(
                     "SELECT record_hash FROM verification_records WHERE artifact_id = ?",
                     (artifact_id,),
                 ).fetchall()
                 return {r["record_hash"] for r in rows}
-            finally:
-                conn.close()
 
     def seen_verification_nonces(self, artifact_id: str) -> set[str]:
         with self._lock:
-            conn = self._connect()
-            try:
+            with self.db.connection() as conn:
                 rows = conn.execute(
-                    "SELECT nonce FROM verification_records WHERE artifact_id = ? AND nonce IS NOT NULL AND nonce != ''",
+                    "SELECT nonce FROM verification_records "
+                    "WHERE artifact_id = ? AND nonce IS NOT NULL AND nonce != ''",
                     (artifact_id,),
                 ).fetchall()
                 return {r["nonce"] for r in rows}
-            finally:
-                conn.close()
