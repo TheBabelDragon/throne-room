@@ -23,12 +23,19 @@ from .models import (
     Sensitivity,
     Trust,
 )
+from .policy import PolicyError, load_routing_policy_loose
 from .promotion import PromotionGate
 from .registry import Registry
-from .router import ArtifactRouter
-from .scanner import ArtifactScanner, ScanError
+from .router import ArtifactRouter, RouteDecision
+from .scanner import ArtifactScanner, ScanError, ScanLimits
 from .storage import LocalBlobStorage, StorageBackend
 from .verifier import ArtifactVerifier
+from .verifiers import (
+    HashBoundSelfCheckVerifier,
+    LeanCertificateVerifier,
+    VerificationRequest,
+    VerifierRegistry,
+)
 
 
 def _utc_now() -> str:
@@ -50,16 +57,47 @@ class ArtifactService:
         self,
         root: Path | str = Path("runtime/artifacts"),
         storage: StorageBackend | None = None,
+        policy_dir: Path | str | None = None,
+        scan_limits: ScanLimits | None = None,
     ) -> None:
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.storage: StorageBackend = storage or LocalBlobStorage(self.root)
         self.isolation = IsolationManager(self.root)
         self.registry = Registry(self.root / "registry.sqlite3")
-        self.scanner = ArtifactScanner(self.root)
+        self.scanner = ArtifactScanner(self.root, limits=scan_limits)
         self.router = ArtifactRouter()
-        self.promotion_gate = PromotionGate(self.registry, self.router)
+        self.verifiers = VerifierRegistry()
+        self.verifiers.register(
+            HashBoundSelfCheckVerifier(blob_resolver=self.storage.get_path)
+        )
+        self.verifiers.register(LeanCertificateVerifier())
+        self.promotion_gate = PromotionGate(
+            self.registry,
+            self.router,
+            isolation_manager=self.isolation,
+            storage=self.storage,
+            verifier_registry=self.verifiers,
+        )
         self.verifier = ArtifactVerifier()
+        self._policy_dir = Path(policy_dir) if policy_dir else self._default_policy_dir()
+        self.routing_policy = None
+        self._load_policies()
+
+    def _default_policy_dir(self) -> Path:
+        # repo-root/policies relative to package
+        return Path(__file__).resolve().parents[2] / "policies"
+
+    def _load_policies(self) -> None:
+        path = self._policy_dir / "artifact_routing.yaml"
+        try:
+            self.routing_policy = load_routing_policy_loose(path)
+            # Wire destinations into router defaults when present
+            if self.routing_policy:
+                self.router.policy = self.routing_policy
+        except PolicyError:
+            # Fall back to code defaults; tests may use temp roots without policies
+            self.routing_policy = None
 
     # ---- runs ------------------------------------------------------------
 
@@ -75,6 +113,16 @@ class ArtifactService:
         trust: Trust = Trust.UNTRUSTED,
         evidence_grade: EvidenceGrade = EvidenceGrade.EXPLORATORY,
     ) -> RunManifest:
+        # Classification authority: untrusted callers cannot create high grades.
+        # Treat incoming high claims as claims only; force baseline until PromotionGate.
+        if trust != Trust.UNTRUSTED:
+            trust = Trust.UNTRUSTED
+        if evidence_grade in (
+            EvidenceGrade.FORMALLY_PROVED,
+            EvidenceGrade.CERTIFIED,
+        ):
+            evidence_grade = EvidenceGrade.EXPLORATORY
+
         run_id = _new_run_id()
         manifest = RunManifest(
             run_id=run_id,
@@ -97,7 +145,7 @@ class ArtifactService:
         return manifest
 
     def get_run(self, run_id: str) -> RunManifest | None:
-        return self.registry.get_run(run_id)
+ return self.registry.get_run(run_id)
 
     def list_runs(self, project: str | None = None) -> list[RunManifest]:
         return self.registry.list_runs(project=project)
@@ -116,17 +164,27 @@ class ArtifactService:
         if manifest is None:
             raise KeyError(f"unknown run_id: {run_id}")
 
-        path = Path(path)
-        try:
-            scanned = self.scanner.scan_file(path, relative_name=filename)
-        except ScanError:
-            raise
+        # Aggregate per-run limits
+        existing = self.registry.list_artifacts(run_id)
+        total_bytes = sum(a.size_bytes for a in existing)
+        if len(existing) >= self.scanner.limits.max_files:
+            raise ScanError("per-run file count limit exceeded")
 
-        # Content-addressed store
+        path = Path(path)
+        scanned = self.scanner.scan_file(path, relative_name=filename)
+        if total_bytes + scanned.size_bytes > self.scanner.limits.max_total_bytes:
+            raise ScanError("per-run total size limit exceeded")
+
+        # Reject overwrite of same relative name in the run
+        for a in existing:
+            if a.original_filename == scanned.relative:
+                raise ScanError(
+                    f"artifact filename already present in run: {scanned.relative}"
+                )
+
         content_hash = self.storage.put_file(path, content_hash=scanned.content_hash)
         blob_path = self.storage.get_path(content_hash)
 
-        # Route: new ingest → quarantine
         decision = self.router.route_new_ingest(manifest)
 
         art_id = _new_artifact_id()
@@ -144,8 +202,8 @@ class ArtifactService:
             size_bytes=scanned.size_bytes,
             source_subsystem=manifest.subsystem,
             parent_run=manifest.parent_run,
-            trust=manifest.trust,
-            evidence_grade=manifest.evidence_grade,
+            trust=Trust.UNTRUSTED,  # claims only; promotion elevates
+            evidence_grade=EvidenceGrade.EXPLORATORY,
             isolation=decision.isolation,
             sensitivity=manifest.sensitivity,
             created_at=_utc_now(),
@@ -199,6 +257,7 @@ class ArtifactService:
             certificate_hash=certificate_hash,
             timestamp=_utc_now(),
         )
+        # Append only — never overwrite prior evidence
         manifest.checks.append(check)
         attach_manifest_hash(manifest)
         self.registry.put_run(manifest)
@@ -209,20 +268,28 @@ class ArtifactService:
         if manifest is None:
             raise KeyError(f"unknown run_id: {run_id}")
         blob_paths: dict[str, Path] = {}
-        for ref in manifest.inputs + manifest.outputs:
+        refs = list(manifest.inputs) + list(manifest.outputs)
+        # Missing blobs must fail even when zero blobs exist
+        for ref in refs:
             if self.storage.exists(ref.content_hash):
                 blob_paths[ref.content_hash] = self.storage.get_path(ref.content_hash)
         result = self.verifier.verify_run(manifest, blob_paths=blob_paths)
-        # Update status
-        if result.ok:
+
+        # Post-check routing
+        if not result.ok:
+            manifest.status = RunStatus.FAILED
+            route = self.router.route_after_checks(manifest)
+            # Do not auto-move storage here; promotion is explicit
+        else:
             if manifest.status != RunStatus.FAILED:
                 manifest.status = RunStatus.COMPLETED
-        else:
-            manifest.status = RunStatus.FAILED
-        # Merge new checks
-        seen = {(c.name, c.detail) for c in manifest.checks}
+            route = self.router.route_after_checks(manifest)
+
+        # Merge new checks without dropping prior ones
+        seen = {(c.name, c.detail, c.status) for c in manifest.checks}
         for c in result.checks:
-            if (c.name, c.detail) not in seen:
+            key = (c.name, c.detail, c.status)
+            if key not in seen:
                 manifest.checks.append(c)
         attach_manifest_hash(manifest)
         self.registry.put_run(manifest)
@@ -231,10 +298,35 @@ class ArtifactService:
             "messages": result.messages,
             "checks": [c.as_dict() for c in result.checks],
             "status": manifest.status.value,
+            "route": {"isolation": route.isolation.value, "rule": route.rule},
         }
 
     def list_artifacts(self, run_id: str) -> list[ArtifactRecord]:
         return self.registry.list_artifacts(run_id)
+
+    def run_verifier(
+        self,
+        *,
+        artifact_id: str,
+        verifier_id: str,
+        proof_target: str = "",
+        source_commit: str = "",
+        certificate_path: Path | None = None,
+    ) -> dict[str, Any]:
+        """Execute a registered verifier adapter; persist sealed record."""
+        art = self.registry.get_artifact(artifact_id)
+        if art is None:
+            raise KeyError(f"unknown artifact_id: {artifact_id}")
+        run = self.registry.get_run(art.run_id)
+        req = VerificationRequest(
+            artifact_id=art.artifact_id,
+            content_hash=art.content_hash,
+            source_commit=source_commit or (run.source_commit if run else ""),
+            proof_target=proof_target,
+            certificate_path=certificate_path,
+        )
+        record = self.verifiers.execute(verifier_id, req)
+        return record.as_dict()
 
     def promote(
         self,
@@ -244,6 +336,9 @@ class ArtifactService:
         actor: str = "operator",
         reason: str = "",
         verifier_evidence: dict[str, Any] | None = None,
+        verifier_id: str | None = None,
+        proof_target: str = "",
+        source_commit: str = "",
     ) -> dict[str, Any]:
         rec = self.registry.get_artifact(artifact_id)
         if rec is None:
@@ -255,19 +350,46 @@ class ArtifactService:
                 f"unknown isolation target: {target}; "
                 f"expected one of {[i.value for i in Isolation]}"
             ) from e
+
+        execution_record = None
+        if verifier_id:
+            run = self.registry.get_run(rec.run_id)
+            req = VerificationRequest(
+                artifact_id=rec.artifact_id,
+                content_hash=rec.content_hash,
+                source_commit=source_commit or (run.source_commit if run else ""),
+                proof_target=proof_target,
+            )
+            execution_record = self.verifiers.execute(verifier_id, req)
+
+        # For VALIDATED, allow integrity self-check as evidence
+        if (
+            target_iso == Isolation.VALIDATED
+            and execution_record is None
+        ):
+            run = self.registry.get_run(rec.run_id)
+            req = VerificationRequest(
+                artifact_id=rec.artifact_id,
+                content_hash=rec.content_hash,
+                source_commit=source_commit or (run.source_commit if run else ""),
+                proof_target=proof_target or "integrity",
+            )
+            execution_record = self.verifiers.execute("hash_bound_self_check", req)
+
         promo = self.promotion_gate.promote(
             rec,
             target_isolation=target_iso,
             actor=actor,
             reason=reason or f"promote to {target_iso.value}",
             verifier_evidence=verifier_evidence,
+            execution_record=execution_record,
+            source_commit=source_commit
+            or (
+                self.registry.get_run(rec.run_id).source_commit
+                if self.registry.get_run(rec.run_id)
+                else ""
+            ),
         )
-        if promo.decision == "ALLOWED":
-            # Place into new tier
-            blob = self.storage.get_path(rec.content_hash)
-            self.isolation.place_link(
-                rec.run_id, target_iso, rec.original_filename, blob
-            )
         return promo.as_dict()
 
     def export_run(self, run_id: str, destination: Path | str) -> Path:
@@ -276,9 +398,7 @@ class ArtifactService:
             raise KeyError(f"unknown run_id: {run_id}")
         dest = Path(destination)
         dest.mkdir(parents=True, exist_ok=True)
-        # Manifest
         write_manifest(dest / "manifest.json", manifest)
-        # Artifacts
         art_dir = dest / "artifacts"
         art_dir.mkdir(exist_ok=True)
         for rec in self.registry.list_artifacts(run_id):
@@ -286,7 +406,6 @@ class ArtifactService:
             out = art_dir / rec.original_filename
             out.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, out)
-        # Audit
         promos = self.registry.list_promotions(run_id=run_id)
         (dest / "promotions.json").write_text(
             json.dumps([p.as_dict() for p in promos], indent=2, sort_keys=True) + "\n",
@@ -298,7 +417,6 @@ class ArtifactService:
         return [p.as_dict() for p in self.registry.list_promotions(run_id=run_id)]
 
     def init_layout(self) -> Path:
-        """Ensure directory layout and empty registry exist."""
         for name in (
             "intake",
             "quarantine",
@@ -310,6 +428,5 @@ class ArtifactService:
             "runs",
         ):
             (self.root / name).mkdir(parents=True, exist_ok=True)
-        # Touch registry
         _ = self.registry
         return self.root
