@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import json
+import secrets
 import shutil
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .hashing import sha256_file
 from .isolation import IsolationManager
 from .manifest import attach_manifest_hash, write_manifest
 from .models import (
@@ -33,6 +33,7 @@ from .verifier import ArtifactVerifier
 from .verifiers import (
     HashBoundSelfCheckVerifier,
     LeanCertificateVerifier,
+    TrustedKeyRegistry,
     VerificationRequest,
     VerifierRegistry,
 )
@@ -59,6 +60,9 @@ class ArtifactService:
         storage: StorageBackend | None = None,
         policy_dir: Path | str | None = None,
         scan_limits: ScanLimits | None = None,
+        *,
+        require_policy: bool = True,
+        verifier_keys: dict[str, bytes] | None = None,
     ) -> None:
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
@@ -67,11 +71,27 @@ class ArtifactService:
         self.registry = Registry(self.root / "registry.sqlite3")
         self.scanner = ArtifactScanner(self.root, limits=scan_limits)
         self.router = ArtifactRouter()
-        self.verifiers = VerifierRegistry()
+
+        key_reg = TrustedKeyRegistry()
+        # Service-held keys (not from caller metadata)
+        default_keys = {
+            "hash_bound_self_check": secrets.token_bytes(32),
+            "lean_certificate": secrets.token_bytes(32),
+        }
+        if verifier_keys:
+            default_keys.update(verifier_keys)
+        for vid, key in default_keys.items():
+            key_reg.register(vid, key)
+
+        self.verifiers = VerifierRegistry(key_registry=key_reg)
         self.verifiers.register(
-            HashBoundSelfCheckVerifier(blob_resolver=self.storage.get_path)
+            HashBoundSelfCheckVerifier(blob_resolver=self.storage.get_path),
+            key=default_keys["hash_bound_self_check"],
         )
-        self.verifiers.register(LeanCertificateVerifier())
+        self.verifiers.register(
+            LeanCertificateVerifier(),
+            key=default_keys["lean_certificate"],
+        )
         self.promotion_gate = PromotionGate(
             self.registry,
             self.router,
@@ -82,6 +102,7 @@ class ArtifactService:
         self.verifier = ArtifactVerifier()
         self._policy_dir = Path(policy_dir) if policy_dir else self._default_policy_dir()
         self.routing_policy = None
+        self._require_policy = require_policy
         self._load_policies()
 
     def _default_policy_dir(self) -> Path:
@@ -91,9 +112,10 @@ class ArtifactService:
         path = self._policy_dir / "artifact_routing.yaml"
         try:
             self.routing_policy = load_routing_policy_loose(path)
-            if self.routing_policy:
-                self.router.policy = self.routing_policy
+            self.router.policy = self.routing_policy
         except PolicyError:
+            if self._require_policy:
+                raise
             self.routing_policy = None
 
     def create_run(
@@ -282,6 +304,7 @@ class ArtifactService:
             "checks": [c.as_dict() for c in result.checks],
             "status": manifest.status.value,
             "route": {"isolation": route.isolation.value, "rule": route.rule},
+            "policy_hash": getattr(self.routing_policy, "content_hash", "") or "",
         }
 
     def list_artifacts(self, run_id: str) -> list[ArtifactRecord]:
@@ -355,12 +378,13 @@ class ArtifactService:
             )
             execution_record = self.verifiers.execute("hash_bound_self_check", req)
 
+        # Caller-supplied verifier_evidence dict is never treated as authentication
         promo = self.promotion_gate.promote(
             rec,
             target_isolation=target_iso,
             actor=actor,
             reason=reason or f"promote to {target_iso.value}",
-            verifier_evidence=verifier_evidence,
+            verifier_evidence=None,  # ignore caller-attested PASS dicts
             execution_record=execution_record,
             source_commit=sc,
         )
@@ -370,14 +394,18 @@ class ArtifactService:
         manifest = self.registry.get_run(run_id)
         if manifest is None:
             raise KeyError(f"unknown run_id: {run_id}")
-        dest = Path(destination)
+        dest = Path(destination).resolve()
         dest.mkdir(parents=True, exist_ok=True)
         write_manifest(dest / "manifest.json", manifest)
         art_dir = dest / "artifacts"
         art_dir.mkdir(exist_ok=True)
         for rec in self.registry.list_artifacts(run_id):
             src = self.storage.get_path(rec.content_hash)
-            out = art_dir / rec.original_filename
+            # Safe relative path under export dest
+            safe_name = Path(rec.original_filename).name
+            out = (art_dir / safe_name).resolve()
+            if not str(out).startswith(str(art_dir.resolve())):
+                raise ValueError(f"export path escape: {rec.original_filename}")
             out.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, out)
         promos = self.registry.list_promotions(run_id=run_id)
