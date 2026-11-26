@@ -26,7 +26,7 @@ from .models import (
 from .policy import PolicyError, load_routing_policy_loose
 from .promotion import PromotionGate
 from .registry import Registry
-from .router import ArtifactRouter, RouteDecision
+from .router import ArtifactRouter
 from .scanner import ArtifactScanner, ScanError, ScanLimits
 from .storage import LocalBlobStorage, StorageBackend
 from .verifier import ArtifactVerifier
@@ -85,21 +85,16 @@ class ArtifactService:
         self._load_policies()
 
     def _default_policy_dir(self) -> Path:
-        # repo-root/policies relative to package
         return Path(__file__).resolve().parents[2] / "policies"
 
     def _load_policies(self) -> None:
         path = self._policy_dir / "artifact_routing.yaml"
         try:
             self.routing_policy = load_routing_policy_loose(path)
-            # Wire destinations into router defaults when present
             if self.routing_policy:
                 self.router.policy = self.routing_policy
         except PolicyError:
-            # Fall back to code defaults; tests may use temp roots without policies
             self.routing_policy = None
-
-    # ---- runs ------------------------------------------------------------
 
     def create_run(
         self,
@@ -113,8 +108,6 @@ class ArtifactService:
         trust: Trust = Trust.UNTRUSTED,
         evidence_grade: EvidenceGrade = EvidenceGrade.EXPLORATORY,
     ) -> RunManifest:
-        # Classification authority: untrusted callers cannot create high grades.
-        # Treat incoming high claims as claims only; force baseline until PromotionGate.
         if trust != Trust.UNTRUSTED:
             trust = Trust.UNTRUSTED
         if evidence_grade in (
@@ -145,12 +138,10 @@ class ArtifactService:
         return manifest
 
     def get_run(self, run_id: str) -> RunManifest | None:
- return self.registry.get_run(run_id)
+        return self.registry.get_run(run_id)
 
     def list_runs(self, project: str | None = None) -> list[RunManifest]:
         return self.registry.list_runs(project=project)
-
-    # ---- ingest ---------------------------------------------------------
 
     def ingest(
         self,
@@ -164,7 +155,6 @@ class ArtifactService:
         if manifest is None:
             raise KeyError(f"unknown run_id: {run_id}")
 
-        # Aggregate per-run limits
         existing = self.registry.list_artifacts(run_id)
         total_bytes = sum(a.size_bytes for a in existing)
         if len(existing) >= self.scanner.limits.max_files:
@@ -175,7 +165,6 @@ class ArtifactService:
         if total_bytes + scanned.size_bytes > self.scanner.limits.max_total_bytes:
             raise ScanError("per-run total size limit exceeded")
 
-        # Reject overwrite of same relative name in the run
         for a in existing:
             if a.original_filename == scanned.relative:
                 raise ScanError(
@@ -184,7 +173,6 @@ class ArtifactService:
 
         content_hash = self.storage.put_file(path, content_hash=scanned.content_hash)
         blob_path = self.storage.get_path(content_hash)
-
         decision = self.router.route_new_ingest(manifest)
 
         art_id = _new_artifact_id()
@@ -202,7 +190,7 @@ class ArtifactService:
             size_bytes=scanned.size_bytes,
             source_subsystem=manifest.subsystem,
             parent_run=manifest.parent_run,
-            trust=Trust.UNTRUSTED,  # claims only; promotion elevates
+            trust=Trust.UNTRUSTED,
             evidence_grade=EvidenceGrade.EXPLORATORY,
             isolation=decision.isolation,
             sensitivity=manifest.sensitivity,
@@ -257,7 +245,6 @@ class ArtifactService:
             certificate_hash=certificate_hash,
             timestamp=_utc_now(),
         )
-        # Append only — never overwrite prior evidence
         manifest.checks.append(check)
         attach_manifest_hash(manifest)
         self.registry.put_run(manifest)
@@ -269,23 +256,19 @@ class ArtifactService:
             raise KeyError(f"unknown run_id: {run_id}")
         blob_paths: dict[str, Path] = {}
         refs = list(manifest.inputs) + list(manifest.outputs)
-        # Missing blobs must fail even when zero blobs exist
         for ref in refs:
             if self.storage.exists(ref.content_hash):
                 blob_paths[ref.content_hash] = self.storage.get_path(ref.content_hash)
         result = self.verifier.verify_run(manifest, blob_paths=blob_paths)
 
-        # Post-check routing
         if not result.ok:
             manifest.status = RunStatus.FAILED
             route = self.router.route_after_checks(manifest)
-            # Do not auto-move storage here; promotion is explicit
         else:
             if manifest.status != RunStatus.FAILED:
                 manifest.status = RunStatus.COMPLETED
             route = self.router.route_after_checks(manifest)
 
-        # Merge new checks without dropping prior ones
         seen = {(c.name, c.detail, c.status) for c in manifest.checks}
         for c in result.checks:
             key = (c.name, c.detail, c.status)
@@ -313,7 +296,6 @@ class ArtifactService:
         source_commit: str = "",
         certificate_path: Path | None = None,
     ) -> dict[str, Any]:
-        """Execute a registered verifier adapter; persist sealed record."""
         art = self.registry.get_artifact(artifact_id)
         if art is None:
             raise KeyError(f"unknown artifact_id: {artifact_id}")
@@ -352,26 +334,23 @@ class ArtifactService:
             ) from e
 
         execution_record = None
+        run = self.registry.get_run(rec.run_id)
+        sc = source_commit or (run.source_commit if run else "")
+
         if verifier_id:
-            run = self.registry.get_run(rec.run_id)
             req = VerificationRequest(
                 artifact_id=rec.artifact_id,
                 content_hash=rec.content_hash,
-                source_commit=source_commit or (run.source_commit if run else ""),
+                source_commit=sc,
                 proof_target=proof_target,
             )
             execution_record = self.verifiers.execute(verifier_id, req)
 
-        # For VALIDATED, allow integrity self-check as evidence
-        if (
-            target_iso == Isolation.VALIDATED
-            and execution_record is None
-        ):
-            run = self.registry.get_run(rec.run_id)
+        if target_iso == Isolation.VALIDATED and execution_record is None:
             req = VerificationRequest(
                 artifact_id=rec.artifact_id,
                 content_hash=rec.content_hash,
-                source_commit=source_commit or (run.source_commit if run else ""),
+                source_commit=sc,
                 proof_target=proof_target or "integrity",
             )
             execution_record = self.verifiers.execute("hash_bound_self_check", req)
@@ -383,12 +362,7 @@ class ArtifactService:
             reason=reason or f"promote to {target_iso.value}",
             verifier_evidence=verifier_evidence,
             execution_record=execution_record,
-            source_commit=source_commit
-            or (
-                self.registry.get_run(rec.run_id).source_commit
-                if self.registry.get_run(rec.run_id)
-                else ""
-            ),
+            source_commit=sc,
         )
         return promo.as_dict()
 
